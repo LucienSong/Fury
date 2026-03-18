@@ -1,0 +1,20 @@
+## Interface: 11507
+## Title: Fury
+## Notes: Fury - Warrior decision assistant for WoW Classic Era
+## Author: Lucien (@硬汉-健将)
+## Version: 1.8
+## SavedVariables: FuryDB
+
+Fury.lua
+
+# BEGIN AUTO MODULES
+modules/decision_profile.lua
+modules/metrics.lua
+modules/metrics_collector.lua
+modules/metrics_decision.lua
+modules/metrics_icon.lua
+modules/metrics_panel.lua
+modules/minimap.lua
+modules/options.lua
+modules/slash.lua
+# END AUTO MODULES
