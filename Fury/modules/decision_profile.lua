@@ -271,6 +271,10 @@ function ns.GetDecisionProfile()
     return base
 end
 
+function ns.GetDefaultDecisionProfile()
+    return DeepCopy(USER_DECISION_PROFILE)
+end
+
 function ns.SetDecisionProfile(partial)
     if not ns.db or not ns.db.metrics or type(partial) ~= "table" then
         return

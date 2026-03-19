@@ -19,6 +19,7 @@ local minimapCheck
 local decisionIconCheck
 local iconTextCheck
 local iconLockCheck
+local hamstringExecuteCheck
 local iconSizeLabel
 local horizonLabel
 local sunderHpLabel
@@ -130,6 +131,9 @@ local function RefreshOptionsState()
     end
     if iconLockCheck and ns.IsDecisionIconLocked then
         iconLockCheck:SetChecked(ns.IsDecisionIconLocked())
+    end
+    if hamstringExecuteCheck and ns.IsHamstringExecutePhaseEnabled then
+        hamstringExecuteCheck:SetChecked(ns.IsHamstringExecutePhaseEnabled())
     end
     if iconSizeLabel and ns.GetDecisionIconSizePresetLabel then
         iconSizeLabel:SetText("图标尺寸: " .. ns.GetDecisionIconSizePresetLabel())
@@ -339,6 +343,22 @@ local function BuildDecisionPage(parent)
             RefreshOptionsState()
         end
     end)
+
+    hamstringExecuteCheck = CreateFrame("CheckButton", "FuryOptionsHamstringExecuteCheck", page, "InterfaceOptionsCheckButtonTemplate")
+    hamstringExecuteCheck:SetPoint("TOPLEFT", horizonMinusButton, "BOTTOMLEFT", 0, -14)
+    _G[hamstringExecuteCheck:GetName() .. "Text"]:SetText("斩杀阶段仍允许断筋骗乱舞")
+    hamstringExecuteCheck:SetScript("OnClick", function(self)
+        if ns.SetHamstringExecutePhaseEnabled then
+            ns.SetHamstringExecutePhaseEnabled(self:GetChecked())
+            RefreshOptionsState()
+        end
+    end)
+
+    local hamstringDesc = page:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+    hamstringDesc:SetPoint("TOPLEFT", hamstringExecuteCheck, "BOTTOMLEFT", 4, -4)
+    hamstringDesc:SetWidth(520)
+    hamstringDesc:SetJustifyH("LEFT")
+    hamstringDesc:SetText("默认关闭，避免斩杀期断筋抢占 Execute / BT / WW 的 GCD。")
 end
 
 local function BuildSunderPage(parent)

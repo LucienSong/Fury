@@ -71,6 +71,17 @@ local CLEAVE_RANK_IDS = { 845, 7369, 11608, 11609, 20569 }
 local BATTLE_SHOUT_RANK_IDS = { 6673, 5242, 6192, 11549, 11550, 11551, 25289 }
 local MOCKING_BLOW_RANK_IDS = { 694, 7400, 7402, 20559, 20560 }
 local EXECUTE_MODEL_CACHE = nil
+local EXECUTE_MODEL_CACHE_AT = 0
+local EXECUTE_MODEL_CACHE_TTL = 15
+local EquipmentStateCache = {
+    dirty = true,
+    value = nil,
+}
+local BattleShoutAuraCache = {
+    dirty = true,
+    units = {},
+    scannedAt = 0,
+}
 
 -- 白名单精细化：setId -> bonus profile（可持续扩展）
 local SET_BONUS_PROFILES = {
@@ -120,6 +131,21 @@ local function GetUnifiedProfile()
     return nil
 end
 
+local function GetDefaultProfile()
+    if ns.GetDefaultDecisionProfile then
+        return ns.GetDefaultDecisionProfile()
+    end
+    return nil
+end
+
+local function GetDefaultProfileSection(key)
+    local profile = GetDefaultProfile()
+    if type(profile) == "table" then
+        return profile[key]
+    end
+    return nil
+end
+
 local function GetPolicyParam(key, defaultValue)
     local profile = GetUnifiedProfile()
     local policy = profile and profile.policyParams
@@ -137,6 +163,10 @@ local function GetSetBonusProfiles()
     if profile and type(profile.setBonusProfiles) == "table" then
         return profile.setBonusProfiles
     end
+    local defaults = GetDefaultProfileSection("setBonusProfiles")
+    if type(defaults) == "table" then
+        return defaults
+    end
     return SET_BONUS_PROFILES
 end
 
@@ -145,6 +175,10 @@ local function GetSetNameProfileHints()
     if profile and type(profile.setNameProfileHints) == "table" then
         return profile.setNameProfileHints
     end
+    local defaults = GetDefaultProfileSection("setNameProfileHints")
+    if type(defaults) == "table" then
+        return defaults
+    end
     return SET_NAME_PROFILE_HINTS
 end
 
@@ -152,6 +186,10 @@ local function GetBuffTrinketWeightProfiles()
     local profile = GetUnifiedProfile()
     if profile and type(profile.buffTrinketWeightProfiles) == "table" then
         return profile.buffTrinketWeightProfiles
+    end
+    local defaults = GetDefaultProfileSection("buffTrinketWeightProfiles")
+    if type(defaults) == "table" then
+        return defaults
     end
     return BUFF_TRINKET_WEIGHT_PROFILES
 end
@@ -406,15 +444,26 @@ ns.GetSunderDutyModes = Decision.GetSunderDutyModes
 
 function Decision.GetHorizonMs()
     local profile = GetUnifiedProfile()
-    if profile and tonumber(profile.decisionHorizonMs) then
-        return Clamp(math.floor(tonumber(profile.decisionHorizonMs) + 0.5), 50, 2000)
+    local defaultProfile = GetDefaultProfile()
+    local legacy = ns.db and ns.db.metrics and ns.db.metrics.decisionHorizonMs
+    local raw = profile and profile.decisionHorizonMs
+    if raw == nil and legacy ~= nil then
+        raw = legacy
     end
-    return (ns.db and ns.db.metrics and ns.db.metrics.decisionHorizonMs) or 400
+    if raw == nil and type(defaultProfile) == "table" then
+        raw = defaultProfile.decisionHorizonMs
+    end
+    if tonumber(raw) then
+        return Clamp(math.floor(tonumber(raw) + 0.5), 50, 2000)
+    end
+    return 400
 end
 
 function Decision.GetConfig()
     local profile = GetUnifiedProfile()
-    local cfg = (profile and profile.decisionConfig) or (ns.db and ns.db.metrics and ns.db.metrics.decisionConfig) or {}
+    local defaults = GetDefaultProfileSection("decisionConfig") or {}
+    local legacy = ns.db and ns.db.metrics and ns.db.metrics.decisionConfig
+    local cfg = (profile and profile.decisionConfig) or legacy or defaults
     local targetStacks = Clamp(tonumber(cfg.sunderTargetStacks) or 5, 1, 5)
     return {
         sunderHpThreshold = Clamp(math.floor((tonumber(cfg.sunderHpThreshold) or 100000) + 0.5), 10000, 5000000),
@@ -429,7 +478,7 @@ end
 
 function Decision.GetHsQueueConfig()
     local profile = GetUnifiedProfile()
-    local cfg = (profile and profile.hsQueueConfig) or {}
+    local cfg = (profile and profile.hsQueueConfig) or GetDefaultProfileSection("hsQueueConfig") or {}
     return {
         enabled = (cfg.enabled == nil) and true or (cfg.enabled and true or false),
         queueWindowMs = Clamp(math.floor((tonumber(cfg.queueWindowMs) or 380) + 0.5), 120, 1000),
@@ -443,7 +492,7 @@ end
 
 function Decision.GetHamstringConfig()
     local profile = GetUnifiedProfile()
-    local cfg = (profile and profile.hamstringConfig) or {}
+    local cfg = (profile and profile.hamstringConfig) or GetDefaultProfileSection("hamstringConfig") or {}
     local baseBias = tonumber(cfg.baseBias)
     if baseBias == nil then
         local legacyBonus = tonumber(cfg.flurryBaitBonus)
@@ -481,7 +530,7 @@ end
 
 function Decision.GetHabitConfig()
     local profile = GetUnifiedProfile()
-    local cfg = (profile and profile.habitConfig) or {}
+    local cfg = (profile and profile.habitConfig) or GetDefaultProfileSection("habitConfig") or {}
     local enabledByProfile = cfg.enabled
     if enabledByProfile == nil then
         enabledByProfile = true
@@ -512,6 +561,22 @@ end
 
 function ns.IsDecisionHabitEnabled()
     return Decision.GetHabitConfig().enabled
+end
+
+function ns.SetHamstringExecutePhaseEnabled(enabled)
+    if not ns.SetDecisionProfile then
+        return
+    end
+    ns.SetDecisionProfile({
+        hamstringConfig = {
+            allowExecutePhase = enabled and true or false,
+        },
+    })
+end
+
+function ns.IsHamstringExecutePhaseEnabled()
+    local cfg = Decision.GetHamstringConfig()
+    return cfg.allowExecutePhase and true or false
 end
 
 function Decision.GetModeOverride()
@@ -961,6 +1026,37 @@ local function GetUnitBuffInfoBySpellIds(unit, spellIdSet)
     return false, 0, 0, nil
 end
 
+local function InvalidateExecuteModelCache()
+    EXECUTE_MODEL_CACHE = nil
+    EXECUTE_MODEL_CACHE_AT = 0
+end
+
+local function InvalidateEquipmentStateCache()
+    EquipmentStateCache.dirty = true
+end
+
+local function InvalidateBattleShoutAuraCache()
+    BattleShoutAuraCache.dirty = true
+end
+
+local function ResetHabitState(modeKey, inCombat)
+    HabitState.lockedSkill = nil
+    HabitState.lockedAt = 0
+    HabitState.lastSwitchAt = 0
+    HabitState.candidateSkill = nil
+    HabitState.candidateSince = 0
+    HabitState.mode = nil
+    HabitState.modeKey = modeKey
+    HabitState.inCombat = inCombat and true or false
+end
+
+local function BuildHabitModeKey(context)
+    local mode = context and context.mode or "UNKNOWN"
+    local stance = context and context.stance or "UNKNOWN"
+    local override = context and context.modeOverride or "auto"
+    return table.concat({ mode, stance, override }, "|")
+end
+
 local function ReadTalentState()
     local state = {
         armsPoints = 0,
@@ -988,7 +1084,7 @@ local function ReadTalentState()
     return state
 end
 
-local function ReadEquipmentState()
+local function ComputeEquipmentState()
     local mainLink = GetInventoryItemLink("player", 16)
     local offLink = GetInventoryItemLink("player", 17)
     local trinket1 = GetInventoryItemLink("player", 13)
@@ -1000,7 +1096,6 @@ local function ReadEquipmentState()
         or offEquipLoc == "INVTYPE_WEAPONOFFHAND"
     )
 
-    local speedMain, speedOff = UnitAttackSpeed("player")
     local state = {
         hasMainHand = mainLink ~= nil,
         hasOffHand = offLink ~= nil,
@@ -1009,8 +1104,8 @@ local function ReadEquipmentState()
         hasOffhandWeapon = hasOffhandWeapon,
         dualWieldWeapon = hasOffhandWeapon,
         dualWield = hasOffhandWeapon,
-        speedMain = speedMain or 0,
-        speedOff = speedOff or 0,
+        speedMain = 0,
+        speedOff = 0,
         setPieceMax = 0,
         setCounts = {},
         setDetails = {},
@@ -1041,6 +1136,20 @@ local function ReadEquipmentState()
             name = setName or ("set:" .. tostring(setId)),
             count = count,
         })
+    end
+    return state
+end
+
+local function ReadEquipmentState()
+    if EquipmentStateCache.dirty or type(EquipmentStateCache.value) ~= "table" then
+        EquipmentStateCache.value = ComputeEquipmentState()
+        EquipmentStateCache.dirty = false
+    end
+    local state = EquipmentStateCache.value
+    if type(state) == "table" then
+        local speedMain, speedOff = UnitAttackSpeed("player")
+        state.speedMain = speedMain or 0
+        state.speedOff = speedOff or 0
     end
     return state
 end
@@ -1195,8 +1304,32 @@ local function IsUnitBattleShoutRange(unit)
     return true
 end
 
+local function ScanBattleShoutAuraCache()
+    local now = GetTime()
+    local units = {}
+    ForEachGroupUnit(function(unit)
+        if not IsUnitBattleShoutCandidate(unit) then
+            return
+        end
+        local active, remaining, duration, auraSpellId = GetUnitBuffInfoBySpellIds(unit, BATTLE_SHOUT_RANK_ID_SET)
+        units[unit] = {
+            active = active and true or false,
+            remaining = remaining or 0,
+            duration = duration or 0,
+            auraSpellId = auraSpellId,
+            expiresAt = active and (now + math.max(remaining or 0, 0)) or 0,
+        }
+    end)
+    BattleShoutAuraCache.units = units
+    BattleShoutAuraCache.scannedAt = now
+    BattleShoutAuraCache.dirty = false
+end
+
 local function ReadBattleShoutState(cfg)
     local refreshSeconds = (cfg and cfg.battleShoutRefreshSeconds) or 12
+    if BattleShoutAuraCache.dirty then
+        ScanBattleShoutAuraCache()
+    end
     local state = {
         selfActive = false,
         selfRemaining = 0,
@@ -1216,7 +1349,12 @@ local function ReadBattleShoutState(cfg)
             return
         end
         state.inRangeUnits = state.inRangeUnits + 1
-        local active, remaining = GetUnitBuffInfoBySpellIds(unit, BATTLE_SHOUT_RANK_ID_SET)
+        local cached = BattleShoutAuraCache.units and BattleShoutAuraCache.units[unit] or nil
+        local active = cached and cached.active or false
+        local remaining = 0
+        if active and cached and type(cached.expiresAt) == "number" and cached.expiresAt > 0 then
+            remaining = math.max(cached.expiresAt - GetTime(), 0)
+        end
         if unit == "player" then
             state.selfActive = active
             state.selfRemaining = remaining
@@ -1256,8 +1394,7 @@ local function EstimateTargetTtd(targetHealthAbs, hostileCount)
     if duration < 2 or totalDps <= 0 then
         return nil, totalDps, snapshot
     end
-    local splitFactor = Clamp(tonumber(hostileCount) or 1, 1, 4)
-    local targetDps = totalDps / splitFactor
+    local targetDps = totalDps
     if targetDps <= 0 then
         return nil, targetDps, snapshot
     end
@@ -1481,7 +1618,8 @@ local function ParseExecuteModelFromDescription(desc)
 end
 
 local function GetExecuteModel()
-    if EXECUTE_MODEL_CACHE then
+    local now = GetTime()
+    if EXECUTE_MODEL_CACHE and (now - (EXECUTE_MODEL_CACHE_AT or 0)) <= EXECUTE_MODEL_CACHE_TTL then
         return EXECUTE_MODEL_CACHE
     end
 
@@ -1512,6 +1650,7 @@ local function GetExecuteModel()
     end
 
     EXECUTE_MODEL_CACHE = model
+    EXECUTE_MODEL_CACHE_AT = now
     return model
 end
 
@@ -1859,6 +1998,9 @@ end
 
 local function SortEvaluations(list)
     table.sort(list, function(a, b)
+        if a.passed ~= b.passed then
+            return a.passed and not b.passed
+        end
         if a.score == b.score then
             return a.token < b.token
         end
@@ -1927,8 +2069,7 @@ local function BuildBattleShoutEval(context, cfg, mode, threat)
     local shoutState = context.battleShoutState or ReadBattleShoutState(shoutCfg)
     local shout = NewEval(TOKENS.BATTLE_SHOUT, mode == "TPS_SURVIVAL" and 64 or 40)
     local oocMinRage = math.max(ABILITIES[TOKENS.BATTLE_SHOUT].rage, shoutCfg.battleShoutOocMinRage or 10)
-    local needsCast = mode == "TPS_SURVIVAL"
-        and IsBattleShoutRefreshWindow(shoutState)
+    local needsCast = ((mode == "TPS_SURVIVAL") and IsBattleShoutRefreshWindow(shoutState))
         or (shoutState and shoutState.selfNeedsCast)
     ApplyCommonChecks(shout, context, {
         requireTarget = false,
@@ -2269,6 +2410,38 @@ local function ApplyLevelUtilityScale(eval, context, token)
     end
 end
 
+local function BuildBloodthirstEval(context, opts)
+    local bt = NewEval(TOKENS.BLOODTHIRST, (opts and opts.baseScore) or 80)
+    ApplyCommonChecks(bt, context, {
+        requireTarget = true,
+        usableToken = TOKENS.BLOODTHIRST,
+        rangeToken = TOKENS.BLOODTHIRST,
+        rageCost = ABILITIES[TOKENS.BLOODTHIRST].rage,
+        cooldown = context.cooldown.bt,
+    })
+    if bt.passed and opts and type(opts.onPassed) == "function" then
+        opts.onPassed(bt)
+    end
+    ApplyLevelUtilityScale(bt, context, TOKENS.BLOODTHIRST)
+    return bt
+end
+
+local function BuildSunderEval(context, cfg, opts)
+    local sunder = NewEval(TOKENS.SUNDER_ARMOR, (opts and opts.baseScore) or 32)
+    ApplyCommonChecks(sunder, context, {
+        requireTarget = true,
+        usableToken = TOKENS.SUNDER_ARMOR,
+        rangeToken = TOKENS.SUNDER_ARMOR,
+        rageCost = ABILITIES[TOKENS.SUNDER_ARMOR].rage,
+        cooldown = 0,
+    })
+    if sunder.passed and opts and type(opts.onPassed) == "function" then
+        opts.onPassed(sunder)
+    end
+    ApplyLevelUtilityScale(sunder, context, TOKENS.SUNDER_ARMOR)
+    return sunder
+end
+
 local function BuildDpsEvaluations(context)
     local cfg = Decision.GetConfig()
     local hamCfg = Decision.GetHamstringConfig()
@@ -2303,35 +2476,30 @@ local function BuildDpsEvaluations(context)
     end
     table.insert(list, ex)
 
-    local bt = NewEval(TOKENS.BLOODTHIRST, 82)
-    ApplyCommonChecks(bt, context, {
-        requireTarget = true,
-        usableToken = TOKENS.BLOODTHIRST,
-        rangeToken = TOKENS.BLOODTHIRST,
-        rageCost = ABILITIES[TOKENS.BLOODTHIRST].rage,
-        cooldown = context.cooldown.bt,
+    local bt = BuildBloodthirstEval(context, {
+        baseScore = 82,
+        onPassed = function(eval)
+            AddReason(eval, math.min(20, math.floor((context.rage - 30) / 3)), "怒气满足主循环")
+            if context.talents and context.talents.hasBloodthirst then
+                AddReason(eval, 6, "天赋已点出 Bloodthirst")
+            end
+            if context.buffs and context.buffs.flurry then
+                AddReason(eval, 4, "Flurry触发中，主循环收益提升")
+            end
+            if context.buffs and context.buffs.offensiveBurst then
+                AddReason(eval, 6, "爆发Buff窗口，优先高收益技能")
+            end
+            if w.bloodthirst ~= 0 then
+                AddReason(eval, w.bloodthirst, "白名单权重: Bloodthirst")
+            end
+            if w.ap > 0 then
+                AddReason(eval, math.floor(w.ap / 120), "白名单权重: AP加成")
+            end
+            if dpsAggressiveBonus > 0 then
+                AddReason(eval, dpsAggressiveBonus, "仇恨余量较高，可更积极使用主循环")
+            end
+        end,
     })
-    if bt.passed then
-        AddReason(bt, math.min(20, math.floor((context.rage - 30) / 3)), "怒气满足主循环")
-        if context.talents and context.talents.hasBloodthirst then
-            AddReason(bt, 6, "天赋已点出 Bloodthirst")
-        end
-        if context.buffs and context.buffs.flurry then
-            AddReason(bt, 4, "Flurry触发中，主循环收益提升")
-        end
-        if context.buffs and context.buffs.offensiveBurst then
-            AddReason(bt, 6, "爆发Buff窗口，优先高收益技能")
-        end
-        if w.bloodthirst ~= 0 then
-            AddReason(bt, w.bloodthirst, "白名单权重: Bloodthirst")
-        end
-        if w.ap > 0 then
-            AddReason(bt, math.floor(w.ap / 120), "白名单权重: AP加成")
-        end
-        if dpsAggressiveBonus > 0 then
-            AddReason(bt, dpsAggressiveBonus, "仇恨余量较高，可更积极使用主循环")
-        end
-    end
     table.insert(list, bt)
 
     -- 斩杀阶段下，按当前 AP 与怒气动态比较 BT vs Execute 的瞬时收益。
@@ -2398,29 +2566,25 @@ local function BuildDpsEvaluations(context)
     end
     table.insert(list, ww)
 
-    local sunder = NewEval(TOKENS.SUNDER_ARMOR, 32)
-    ApplyCommonChecks(sunder, context, {
-        requireTarget = true,
-        usableToken = TOKENS.SUNDER_ARMOR,
-        rangeToken = TOKENS.SUNDER_ARMOR,
-        rageCost = ABILITIES[TOKENS.SUNDER_ARMOR].rage,
-        cooldown = 0,
+    local sunder = BuildSunderEval(context, cfg, {
+        baseScore = 32,
+        onPassed = function(eval)
+            local sunderState = ReadSunderState()
+            ApplyDpsSunderDuty(eval, context, cfg, sunderState)
+            if not eval.passed then
+                return
+            end
+            local delta, note = CalcSunderValue(context, context.mode, cfg)
+            AddReason(eval, delta, note)
+            AddReason(eval, 3, "可作为填充GCD")
+            if context.trinket and context.trinket.anyActive then
+                AddReason(eval, -2, "饰品爆发中，优先直接伤害技能")
+            end
+            if w.sunder ~= 0 then
+                AddReason(eval, w.sunder, "白名单权重: Sunder")
+            end
+        end,
     })
-    if sunder.passed then
-        local sunderState = ReadSunderState()
-        ApplyDpsSunderDuty(sunder, context, cfg, sunderState)
-    end
-    if sunder.passed then
-        local delta, note = CalcSunderValue(context, context.mode, cfg)
-        AddReason(sunder, delta, note)
-        AddReason(sunder, 3, "可作为填充GCD")
-        if context.trinket and context.trinket.anyActive then
-            AddReason(sunder, -2, "饰品爆发中，优先直接伤害技能")
-        end
-        if w.sunder ~= 0 then
-            AddReason(sunder, w.sunder, "白名单权重: Sunder")
-        end
-    end
     table.insert(list, sunder)
 
     local shout = BuildBattleShoutEval(context, cfg, "DPS", threat)
@@ -2518,10 +2682,8 @@ local function BuildDpsEvaluations(context)
     table.insert(list, ham)
 
     ApplyLevelUtilityScale(ex, context, TOKENS.EXECUTE)
-    ApplyLevelUtilityScale(bt, context, TOKENS.BLOODTHIRST)
     ApplyLevelUtilityScale(ww, context, TOKENS.WHIRLWIND)
     ApplyLevelUtilityScale(shout, context, TOKENS.BATTLE_SHOUT)
-    ApplyLevelUtilityScale(sunder, context, TOKENS.SUNDER_ARMOR)
     ApplyLevelUtilityScale(ham, context, TOKENS.HAMSTRING)
 
     local wait = NewEval(TOKENS.WAIT, 5)
@@ -2694,43 +2856,39 @@ local function BuildTpsEvaluations(context)
     end
     table.insert(list, ss)
 
-    local sunder = NewEval(TOKENS.SUNDER_ARMOR, 82)
-    ApplyCommonChecks(sunder, context, {
-        requireTarget = true,
-        usableToken = TOKENS.SUNDER_ARMOR,
-        rangeToken = TOKENS.SUNDER_ARMOR,
-        rageCost = ABILITIES[TOKENS.SUNDER_ARMOR].rage,
-        cooldown = 0,
+    local sunder = BuildSunderEval(context, cfg, {
+        baseScore = 82,
+        onPassed = function(eval)
+            if threat.status <= 1 then
+                AddReason(eval, 16, "仇恨地位偏低，补破甲拉升TPS")
+            elseif threat.status == 2 then
+                AddReason(eval, 8, "仇恨接近前排，破甲有稳定收益")
+            else
+                AddReason(eval, 2, "已稳住仇恨，破甲收益较平缓")
+            end
+
+            ApplyTpsSunderDuty(eval, context, cfg, sunderState)
+            if not eval.passed then
+                return
+            end
+
+            if threat.scaledPct < 90 then
+                AddReason(eval, 10, "威胁百分比<90%，补稳仇恨面")
+            end
+            if tpsThreatBias > 0 then
+                AddReason(eval, math.floor(tpsThreatBias), "TPS 威胁偏置")
+            end
+            if w.sunder ~= 0 then
+                AddReason(eval, w.sunder, "白名单权重: Sunder")
+            end
+            if w.threat ~= 0 then
+                AddReason(eval, math.floor(w.threat * 0.35), "白名单权重: 仇恨")
+            end
+            local delta, note = CalcSunderValue(context, context.mode, cfg)
+            AddReason(eval, delta, note)
+            AddReason(eval, 8, "兜底仇恨技能")
+        end,
     })
-    if sunder.passed then
-        if threat.status <= 1 then
-            AddReason(sunder, 16, "仇恨地位偏低，补破甲拉升TPS")
-        elseif threat.status == 2 then
-            AddReason(sunder, 8, "仇恨接近前排，破甲有稳定收益")
-        else
-            AddReason(sunder, 2, "已稳住仇恨，破甲收益较平缓")
-        end
-
-        ApplyTpsSunderDuty(sunder, context, cfg, sunderState)
-
-        if threat.scaledPct < 90 then
-            AddReason(sunder, 10, "威胁百分比<90%，补稳仇恨面")
-        end
-        if tpsThreatBias > 0 then
-            AddReason(sunder, math.floor(tpsThreatBias), "TPS 威胁偏置")
-        end
-        if w.sunder ~= 0 then
-            AddReason(sunder, w.sunder, "白名单权重: Sunder")
-        end
-        if w.threat ~= 0 then
-            AddReason(sunder, math.floor(w.threat * 0.35), "白名单权重: 仇恨")
-        end
-    end
-    if sunder.passed then
-        local delta, note = CalcSunderValue(context, context.mode, cfg)
-        AddReason(sunder, delta, note)
-        AddReason(sunder, 8, "兜底仇恨技能")
-    end
     table.insert(list, sunder)
 
     local shout = BuildBattleShoutEval(context, cfg, "TPS_SURVIVAL", threat)
@@ -2739,35 +2897,30 @@ local function BuildTpsEvaluations(context)
     end
     table.insert(list, shout)
 
-    local bt = NewEval(TOKENS.BLOODTHIRST, 78)
-    ApplyCommonChecks(bt, context, {
-        requireTarget = true,
-        usableToken = TOKENS.BLOODTHIRST,
-        rangeToken = TOKENS.BLOODTHIRST,
-        rageCost = ABILITIES[TOKENS.BLOODTHIRST].rage,
-        cooldown = context.cooldown.bt,
+    local bt = BuildBloodthirstEval(context, {
+        baseScore = 78,
+        onPassed = function(eval)
+            AddReason(eval, 8, "狂暴坦可用的高威胁回填")
+            if threat.status <= 1 then
+                AddReason(eval, 10, "仇恨未稳，需强力单体威胁")
+            end
+            if threatUrgency > 0 then
+                AddReason(eval, math.floor(threatUrgency * bloodthirstUrgencyCoeff), "威胁紧迫度提升 BT 价值")
+            end
+            if sunderState.stacks < cfg.sunderTargetStacks then
+                AddReason(eval, -8, "破甲层数未满，先稳破甲更优")
+            end
+            if context.buffs and context.buffs.offensiveBurst then
+                AddReason(eval, 5, "爆发Buff窗口下 BT 威胁更高")
+            end
+            if w.bloodthirst ~= 0 then
+                AddReason(eval, w.bloodthirst, "白名单权重: Bloodthirst")
+            end
+            if w.ap > 0 then
+                AddReason(eval, math.floor(w.ap / 140), "白名单权重: AP加成")
+            end
+        end,
     })
-    if bt.passed then
-        AddReason(bt, 8, "狂暴坦可用的高威胁回填")
-        if threat.status <= 1 then
-            AddReason(bt, 10, "仇恨未稳，需强力单体威胁")
-        end
-        if threatUrgency > 0 then
-            AddReason(bt, math.floor(threatUrgency * bloodthirstUrgencyCoeff), "威胁紧迫度提升 BT 价值")
-        end
-        if sunderState.stacks < cfg.sunderTargetStacks then
-            AddReason(bt, -8, "破甲层数未满，先稳破甲更优")
-        end
-        if context.buffs and context.buffs.offensiveBurst then
-            AddReason(bt, 5, "爆发Buff窗口下 BT 威胁更高")
-        end
-        if w.bloodthirst ~= 0 then
-            AddReason(bt, w.bloodthirst, "白名单权重: Bloodthirst")
-        end
-        if w.ap > 0 then
-            AddReason(bt, math.floor(w.ap / 140), "白名单权重: AP加成")
-        end
-    end
     table.insert(list, bt)
 
     local sb = NewEval(TOKENS.SHIELD_BLOCK, 76)
@@ -2836,7 +2989,16 @@ local function PickBest(list)
     if not list or #list == 0 then
         return TOKENS.NONE, "无候选技能"
     end
-    local best = list[1]
+    local best = nil
+    for _, entry in ipairs(list) do
+        if entry.passed then
+            best = entry
+            break
+        end
+    end
+    if not best then
+        best = list[1]
+    end
     if not best.passed and best.token ~= TOKENS.WAIT then
         return TOKENS.WAIT, "候选技能均不满足，等待窗口"
     end
@@ -2890,22 +3052,18 @@ local function SelectHabitSkill(context, nextEvaluations, bestSkill, bestReason,
         return bestSkill, bestReason, info
     end
 
-    if HabitState.mode ~= context.mode then
-        HabitState.lockedSkill = nil
-        HabitState.candidateSkill = nil
-        HabitState.mode = context.mode
+    local modeKey = BuildHabitModeKey(context)
+    if HabitState.modeKey ~= modeKey then
+        ResetHabitState(modeKey, context.inCombat)
         info.decision = "reset-mode"
     end
     if HabitState.inCombat ~= context.inCombat then
-        HabitState.lockedSkill = nil
-        HabitState.candidateSkill = nil
-        HabitState.inCombat = context.inCombat and true or false
+        ResetHabitState(modeKey, context.inCombat)
         info.decision = info.decision == "reset-mode" and "reset-mode-combat" or "reset-combat"
     end
 
     if not context.targetExists then
-        HabitState.lockedSkill = nil
-        HabitState.candidateSkill = nil
+        ResetHabitState(modeKey, context.inCombat)
         info.decision = "reset-no-target"
         return bestSkill, bestReason, info
     end
@@ -3000,8 +3158,8 @@ local function IsPredictableToken(context, entry)
     end
     if token == TOKENS.BATTLE_SHOUT then
         local shoutState = context and context.battleShoutState or nil
-        local needsCast = context and context.mode == "TPS_SURVIVAL"
-            and shoutState and shoutState.effectUnits and shoutState.effectUnits > 0
+        local needsCast = ((context and context.mode == "TPS_SURVIVAL")
+            and shoutState and shoutState.effectUnits and shoutState.effectUnits > 0)
             or (shoutState and shoutState.selfNeedsCast)
         if not entry.passed or not needsCast then
             return false
@@ -3073,7 +3231,16 @@ local function PickBestOffGcd(list)
     if not list or #list == 0 then
         return TOKENS.NONE, "无可用Off-GCD动作", nil
     end
-    local best = list[1]
+    local best = nil
+    for _, entry in ipairs(list) do
+        if entry.passed then
+            best = entry
+            break
+        end
+    end
+    if not best then
+        best = list[1]
+    end
     if not best.passed and best.token ~= TOKENS.NONE then
         return TOKENS.NONE, "当前无值得插入的Off-GCD动作", best
     end
@@ -3404,7 +3571,45 @@ function Decision.GetRecommendation()
 end
 
 function DecisionModule:Init()
-    -- 决策模块按需计算，不主动监听事件。
+    local frame = CreateFrame("Frame")
+    frame:RegisterEvent("PLAYER_ENTERING_WORLD")
+    frame:RegisterEvent("PLAYER_LEVEL_UP")
+    frame:RegisterEvent("SPELLS_CHANGED")
+    frame:RegisterEvent("PLAYER_EQUIPMENT_CHANGED")
+    frame:RegisterEvent("GROUP_ROSTER_UPDATE")
+    frame:RegisterEvent("PARTY_MEMBERS_CHANGED")
+    frame:RegisterEvent("RAID_ROSTER_UPDATE")
+    frame:RegisterEvent("UNIT_AURA")
+    frame:SetScript("OnEvent", function(_, event, arg1)
+        if event == "PLAYER_ENTERING_WORLD" then
+            InvalidateExecuteModelCache()
+            InvalidateEquipmentStateCache()
+            InvalidateBattleShoutAuraCache()
+            ResetHabitState(nil, UnitAffectingCombat("player"))
+            return
+        end
+        if event == "PLAYER_LEVEL_UP" or event == "SPELLS_CHANGED" then
+            InvalidateExecuteModelCache()
+            return
+        end
+        if event == "PLAYER_EQUIPMENT_CHANGED" then
+            InvalidateEquipmentStateCache()
+            return
+        end
+        if event == "GROUP_ROSTER_UPDATE" or event == "PARTY_MEMBERS_CHANGED" or event == "RAID_ROSTER_UPDATE" then
+            InvalidateBattleShoutAuraCache()
+            return
+        end
+        if event == "UNIT_AURA" then
+            if arg1 == "player" or arg1 == "target" or (type(arg1) == "string" and strfind(arg1, "^party")) then
+                InvalidateBattleShoutAuraCache()
+                if arg1 == "player" then
+                    InvalidateExecuteModelCache()
+                end
+            end
+        end
+    end)
+    self.eventFrame = frame
 end
 
 ns.RegisterModule(DecisionModule)
