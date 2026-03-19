@@ -45,7 +45,9 @@ local SPELL = {
 }
 
 local ReadThreatState
+local ReadSunderState
 local IsOffGcdToken
+local FindEvalByToken
 
 local SPELL_ID = {
     BATTLE_STANCE = 2457,
@@ -271,6 +273,41 @@ local OFF_GCD_ACTIONABLE_TOKENS = {
     [TOKENS.LAST_STAND] = true,
 }
 
+local PLANNER_DEFAULT_DEPTH = 2
+local PLANNER_DEEP_DEPTH = 3
+local PLANNER_WAIT_STEP_MAX = 0.35
+local PLANNER_FUTURE_DECAY = 0.82
+local PLANNER_GCD_SECONDS = 1.5
+local TOKEN_BASE_COOLDOWN = {
+    [TOKENS.BLOODRAGE] = 60,
+    [TOKENS.BLOODTHIRST] = 6,
+    [TOKENS.WHIRLWIND] = 10,
+    [TOKENS.EXECUTE] = 0,
+    [TOKENS.HAMSTRING] = 0,
+    [TOKENS.BATTLE_SHOUT] = 0,
+    [TOKENS.SUNDER_ARMOR] = 0,
+    [TOKENS.REVENGE] = 5,
+    [TOKENS.SHIELD_BLOCK] = 5,
+    [TOKENS.SHIELD_SLAM] = 6,
+    [TOKENS.LAST_STAND] = 480,
+    [TOKENS.TAUNT] = 10,
+    [TOKENS.MOCKING_BLOW] = 120,
+    [TOKENS.HEROIC_STRIKE] = 0,
+    [TOKENS.CLEAVE] = 0,
+}
+local DPS_PREMIUM_TOKENS = {
+    [TOKENS.BLOODTHIRST] = true,
+    [TOKENS.WHIRLWIND] = true,
+    [TOKENS.EXECUTE] = true,
+}
+local TPS_PREMIUM_TOKENS = {
+    [TOKENS.SHIELD_SLAM] = true,
+    [TOKENS.REVENGE] = true,
+    [TOKENS.TAUNT] = true,
+    [TOKENS.MOCKING_BLOW] = true,
+    [TOKENS.SUNDER_ARMOR] = true,
+}
+
 local function Clamp(v, minV, maxV)
     if v < minV then
         return minV
@@ -366,9 +403,21 @@ function Decision.GetTokenForSpellId(spellId)
 end
 
 function Decision.GetTokenTexture(token)
+    if token == TOKENS.WAIT or token == TOKENS.HOLD then
+        return "Interface\\Icons\\INV_Misc_PocketWatch_01"
+    end
     local info = ABILITIES[token]
     if info and info.id then
-        return GetSpellTexture(info.id)
+        local texture = GetSpellTexture(info.id)
+        if texture then
+            return texture
+        end
+        if info.name then
+            texture = GetSpellTexture(info.name)
+            if texture then
+                return texture
+            end
+        end
     end
     return "Interface\\Icons\\INV_Misc_QuestionMark"
 end
@@ -1429,6 +1478,7 @@ local function BuildContext()
     local buffs = ReadBuffState()
     local battleShoutState = ReadBattleShoutState(cfg)
     local hamstringState = ReadHamstringState()
+    local sunderState = ReadSunderState()
     local threat = ReadThreatState()
     local setWeights, activeSetProfiles = BuildSetWeightState(equipment)
     local procWeights, activeProcProfiles = BuildProcWeightState()
@@ -1513,6 +1563,7 @@ local function BuildContext()
         buffs = buffs,
         battleShoutState = battleShoutState,
         hamstringState = hamstringState,
+        sunderState = sunderState,
         known = {
             battleShout = IsTokenKnown(TOKENS.BATTLE_SHOUT),
             execute = IsTokenKnown(TOKENS.EXECUTE),
@@ -1661,7 +1712,7 @@ local function EstimateExecuteDamage(rage)
     return model.baseDamage + extraRage * model.perRage, extraRage, model
 end
 
-local function ReadSunderState()
+ReadSunderState = function()
     local result = {
         stacks = 0,
         remaining = 0,
@@ -1865,6 +1916,33 @@ local function EstimateFlurrySwingValue(context, hamCfg)
     return value * ttlScale, charges, window
 end
 
+local function GetHamstringNextSwingPair(context)
+    local queue = context and context.queue or {}
+    local equipment = context and context.equipment or {}
+    local nextMain = tonumber(queue.timeToMain) or math.huge
+    local nextOff = equipment.hasOffhandWeapon and (tonumber(queue.timeToOff) or math.huge) or math.huge
+    local first = math.min(nextMain, nextOff)
+    local second
+    if nextMain <= nextOff then
+        second = nextOff
+    else
+        second = nextMain
+    end
+    if second == math.huge then
+        second = first
+    end
+    return first, second
+end
+
+local function IsPerfectHamstringBaitWindow(context)
+    local firstSwing, secondSwing = GetHamstringNextSwingPair(context)
+    return (tonumber(context and context.critChance) or 0) <= 25
+        and firstSwing <= 0.25
+        and secondSwing <= 0.55
+        and (tonumber(context and context.rage) or 0) >= 20
+        and not (context and context.buffs and context.buffs.flurry)
+end
+
 local function CalcHamstringProtectReserve(context, hamCfg)
     local reserve = 0
     if (tonumber(context and context.cooldown and context.cooldown.bt) or math.huge) <= ((tonumber(hamCfg and hamCfg.btProtectMs) or 0) / 1000) then
@@ -1881,8 +1959,13 @@ local function CalcHamstringProtectReserve(context, hamCfg)
 end
 
 local function CalcHamstringEvScore(context, hamCfg)
+    local perfectWindow = IsPerfectHamstringBaitWindow(context)
     if context and context.buffs and context.buffs.flurry then
         return -60, { reason = "Flurry已激活，断筋骗乱舞收益极低" }
+    end
+    local flurryUptime = GetHamstringObservedFlurryUptime(context)
+    if flurryUptime >= 0.45 and not perfectWindow then
+        return -28, { reason = string.format("乱舞覆盖已稳定(%.0f%%)，继续断筋会开始扰乱主循环", flurryUptime * 100) }
     end
     local estTtd = tonumber(context and context.estimatedTargetTtd) or nil
     if estTtd and estTtd > 0 and estTtd <= (tonumber(hamCfg and hamCfg.minTargetTtdSeconds) or 10) then
@@ -1893,19 +1976,60 @@ local function CalcHamstringEvScore(context, hamCfg)
         return -36, { reason = string.format("预计目标%.1fs内结束且怒气不足，优先保主循环资源", estTtd) }
     end
     local naturalChance, _, pHamCrit = EstimateNaturalFlurryProcChance(context, hamCfg)
+    local nextSwing, secondSwing = GetHamstringNextSwingPair(context)
+    local critChance = tonumber(context and context.critChance) or 0
+    if nextSwing > 0.75 then
+        return -22, { reason = string.format("最近挥击窗口偏远(%.2fs)，断筋难以快速兑现乱舞收益", nextSwing) }
+    end
+    if secondSwing > 1.35 and (tonumber(context and context.cooldown and context.cooldown.bt) or math.huge) > 0.85
+        and (tonumber(context and context.cooldown and context.cooldown.ww) or math.huge) > 1.10 then
+        return -18, { reason = "后续可兑现收益的第二个攻击事件过远，断筋时机不佳" }
+    end
+    if naturalChance >= 0.55 then
+        return -28, { reason = string.format("自然触发乱舞概率已很高(%.0f%%)，无需再用断筋补触发", naturalChance * 100) }
+    end
+    if critChance >= 38 and not (nextSwing <= 0.22 and secondSwing <= 0.65 and (tonumber(context and context.rage) or 0) >= 28) then
+        return -26, { reason = "高暴击环境下仅在极佳双挥击窗口才考虑断筋" }
+    end
+    if critChance >= 35 and naturalChance >= 0.40 then
+        return -24, { reason = "高暴击环境下自然乱舞已足够频繁，断筋不应成为常规填充" }
+    end
     local swingValue, chargeCount = EstimateFlurrySwingValue(context, hamCfg)
     if chargeCount <= 0 or swingValue <= 0 then
         return -40, { reason = "未来挥击窗口过短，断筋骗乱舞吃不满3层收益" }
     end
     local deltaProc = Clamp(pHamCrit * (1 - naturalChance), 0, 1)
+    if deltaProc < 0.10 then
+        return -20, { reason = string.format("额外乱舞触发概率仅%.0f%%，断筋边际收益不足", deltaProc * 100) }
+    end
+    local timingBonus = 0
+    if nextSwing <= 0.30 and secondSwing <= 0.85 then
+        timingBonus = 4
+    elseif nextSwing <= 0.45 then
+        timingBonus = 2
+    end
+    if critChance <= 25 and nextSwing <= 0.25 and secondSwing <= 0.55 and (tonumber(context and context.rage) or 0) >= 20 and naturalChance <= 0.32 then
+        timingBonus = timingBonus + 10
+    end
     local reserve = CalcHamstringProtectReserve(context, hamCfg)
+    if (tonumber(context and context.rage) or 0) < 18 and (nextSwing > 0.35 or secondSwing > 0.95) then
+        return -26, { reason = "怒气偏低且挥击兑现不够快，应优先保留资源" }
+    end
+    if estTtd and estTtd <= math.max((tonumber(hamCfg and hamCfg.minTargetTtdSeconds) or 10) * 2.0, 24.0)
+        and (tonumber(context and context.rage) or 0) < math.max(reserve + 12, 28) then
+        return -24, { reason = "中短战斗且怒气偏紧，应优先保证主循环而不是断筋" }
+    end
     local rageAfter = (tonumber(context and context.rage) or 0) - ABILITIES[TOKENS.HAMSTRING].rage
     local ragePenalty = math.max(0, reserve - rageAfter) * (tonumber(hamCfg and hamCfg.ragePenaltyScale) or 0.8)
+    if flurryUptime >= 0.65 then
+        ragePenalty = ragePenalty + (flurryUptime - 0.65) * 10
+    end
     if context and context.queue and context.queue.queueWindowOpen and (context.equipment and context.equipment.hasOffhandWeapon) and rageAfter < 30 then
         ragePenalty = ragePenalty + 2
     end
     local score = (tonumber(hamCfg and hamCfg.baseBias) or 1)
         + deltaProc * swingValue * (tonumber(hamCfg and hamCfg.evScale) or 18)
+        + timingBonus
         - (tonumber(hamCfg and hamCfg.gcdPenalty) or 1)
         - ragePenalty
     return score, {
@@ -1916,6 +2040,7 @@ local function CalcHamstringEvScore(context, hamCfg)
         chargeCount = chargeCount,
         reserve = reserve,
         ragePenalty = ragePenalty,
+        timingBonus = timingBonus,
     }
 end
 
@@ -2008,6 +2133,7 @@ local function SortEvaluations(list)
     end)
 end
 
+
 local function CalcSunderValueByTargetHp(targetHpPct, mode)
     -- 将目标血量映射到 [0,1]，血越高代表破甲持续收益期越长。
     local hp = Clamp((targetHpPct or 100) / 100, 0, 1)
@@ -2067,10 +2193,16 @@ end
 local function BuildBattleShoutEval(context, cfg, mode, threat)
     local shoutCfg = cfg or context.config or Decision.GetConfig()
     local shoutState = context.battleShoutState or ReadBattleShoutState(shoutCfg)
-    local shout = NewEval(TOKENS.BATTLE_SHOUT, mode == "TPS_SURVIVAL" and 64 or 40)
+    local shout = NewEval(TOKENS.BATTLE_SHOUT, mode == "TPS_SURVIVAL" and 64 or 18)
     local oocMinRage = math.max(ABILITIES[TOKENS.BATTLE_SHOUT].rage, shoutCfg.battleShoutOocMinRage or 10)
+    local playerShoutActive = (context.buffs and context.buffs.battleShout) or (shoutState and shoutState.selfActive) or false
+    local playerShoutRemaining = tonumber(context.buffs and context.buffs.battleShoutRemaining) or (shoutState and shoutState.selfRemaining) or 0
+    local refreshSeconds = (shoutState and shoutState.refreshSeconds) or shoutCfg.battleShoutRefreshSeconds or 12
+    local dpsRefreshWindow = math.min(refreshSeconds, 4)
+    local playerNeedsCast = (not playerShoutActive)
+        or (playerShoutRemaining <= ((mode == "DPS" and context.inCombat) and dpsRefreshWindow or refreshSeconds))
     local needsCast = ((mode == "TPS_SURVIVAL") and IsBattleShoutRefreshWindow(shoutState))
-        or (shoutState and shoutState.selfNeedsCast)
+        or playerNeedsCast
     ApplyCommonChecks(shout, context, {
         requireTarget = false,
         usableToken = TOKENS.BATTLE_SHOUT,
@@ -2096,10 +2228,10 @@ local function BuildBattleShoutEval(context, cfg, mode, threat)
 
     if not context.inCombat then
         AddReason(shout, 18, "脱战窗口补 Battle Shout")
-        if not shoutState.selfActive then
+        if not playerShoutActive then
             AddReason(shout, 12, "自身未覆盖 Battle Shout")
         else
-            AddReason(shout, 8, "Battle Shout 即将到期(" .. string.format("%.1f", shoutState.selfRemaining or 0) .. "s)")
+            AddReason(shout, 8, "Battle Shout 即将到期(" .. string.format("%.1f", playerShoutRemaining or 0) .. "s)")
         end
         if shoutState.effectUnits > 1 then
             AddReason(shout, math.floor((shoutState.effectUnits - 1) * 3), "顺手补到附近队友")
@@ -2108,7 +2240,11 @@ local function BuildBattleShoutEval(context, cfg, mode, threat)
     end
 
     if mode == "DPS" then
-        local sunderState = ReadSunderState()
+        if playerShoutActive and playerShoutRemaining > dpsRefreshWindow then
+            Reject(shout, "DPS下 Battle Shout 剩余时间充足")
+            return shout
+        end
+        local sunderState = context.sunderState or ReadSunderState()
         local sunderDuty = NormalizeSunderDutyMode(shoutCfg.sunderDutyMode)
         local sunderStackUrgent = false
         if sunderDuty ~= "external_armor" and (context.targetBossLike or IsRaidTrashContext(context)) then
@@ -2127,14 +2263,14 @@ local function BuildBattleShoutEval(context, cfg, mode, threat)
 
         local protect = false
         local rageCost = ABILITIES[TOKENS.BATTLE_SHOUT].rage
-        if context.cooldown.bt <= 0.45 and context.rage < (ABILITIES[TOKENS.BLOODTHIRST].rage + rageCost) then
+        if context.cooldown.bt <= 1.25 then
             protect = true
         end
-        if context.cooldown.ww <= 0.55 and context.rage < (ABILITIES[TOKENS.WHIRLWIND].rage + rageCost) then
+        if context.cooldown.ww <= 1.25 then
             protect = true
         end
         if context.targetHealthPct and context.targetHealthPct <= 20 and context.cooldown.ex <= 0.35
-            and context.rage < (ABILITIES[TOKENS.EXECUTE].rage + rageCost) then
+        then
             protect = true
         end
         if protect then
@@ -2142,26 +2278,26 @@ local function BuildBattleShoutEval(context, cfg, mode, threat)
             return shout
         end
 
-        AddReason(shout, 10, "Battle Shout 进入补/续窗口")
-        if not shoutState.selfActive then
-            AddReason(shout, 12, "自身未覆盖 Battle Shout")
+        AddReason(shout, 6, "Battle Shout 进入补/续窗口")
+        if not playerShoutActive then
+            AddReason(shout, 10, "自身未覆盖 Battle Shout")
         else
-            AddReason(shout, 8, "Battle Shout 即将到期(" .. string.format("%.1f", shoutState.selfRemaining or 0) .. "s)")
+            AddReason(shout, 4, "Battle Shout 即将到期(" .. string.format("%.1f", playerShoutRemaining or 0) .. "s)")
         end
         if shoutState.effectUnits > 1 then
-            AddReason(shout, math.floor((shoutState.effectUnits - 1) * 4), "兼顾队友覆盖收益")
+            AddReason(shout, math.floor((shoutState.effectUnits - 1) * 1.5), "兼顾队友覆盖收益")
         end
         if context.targetBossLike then
-            AddReason(shout, 4, "Boss战中长期收益更稳定")
+            AddReason(shout, 2, "Boss战中长期收益更稳定")
         end
         if context.targetHealthPct and context.targetHealthPct <= 20 then
-            AddReason(shout, -10, "斩杀期优先直接伤害")
+            AddReason(shout, -18, "斩杀期优先直接伤害")
         end
         if context.trinket and context.trinket.anyActive then
-            AddReason(shout, -4, "爆发窗口优先直接伤害技能")
+            AddReason(shout, -8, "爆发窗口优先直接伤害技能")
         end
         if context.weights and context.weights.dps and context.weights.dps > 0 then
-            AddReason(shout, math.floor(context.weights.dps * 0.25), "白名单权重: 团队Buff收益")
+            AddReason(shout, math.floor(context.weights.dps * 0.1), "白名单权重: 团队Buff收益")
         end
         return shout
     end
@@ -2191,6 +2327,25 @@ local function BuildBattleShoutEval(context, cfg, mode, threat)
         AddReason(shout, math.floor(context.weights.threat * 0.2), "白名单权重: 仇恨")
     end
     return shout
+end
+
+local function BuildOutOfCombatEvaluations(context)
+    local cfg = Decision.GetConfig()
+    local threat = context.threat or ReadThreatState()
+    local list = {}
+
+    local shout = BuildBattleShoutEval(context, cfg, context.mode, threat)
+    if shout.passed and context.weights and context.weights.ap and context.weights.ap > 0 then
+        AddReason(shout, math.floor(context.weights.ap / 180), "白名单权重: AP团队收益")
+    end
+    table.insert(list, shout)
+
+    local wait = NewEval(TOKENS.WAIT, 0)
+    AddReason(wait, 0, "脱战状态，仅显示可预铺Buff")
+    table.insert(list, wait)
+
+    SortEvaluations(list)
+    return list
 end
 
 local function ApplyDpsSunderDuty(eval, context, cfg, sunderState)
@@ -2289,22 +2444,29 @@ local function ApplyTpsSunderDuty(eval, context, cfg, sunderState)
 
     if duty == "self_stack" then
         if context.targetBossLike then
+            local refreshWindow = math.max(cfg.sunderRefreshSeconds + 2, 12)
+            local urgentWindow = math.max(cfg.sunderRefreshSeconds * 0.75, 6)
             if stacks < targetStacks then
                 AddReason(eval, -16, "Boss战补层职责交给 DPS")
-            elseif remaining < cfg.sunderRefreshSeconds then
-                AddReason(eval, 14, "Boss破甲将到期，由 tank 择机刷新")
-                if remaining <= math.max(cfg.sunderRefreshSeconds * 0.4, 2.5) then
-                    AddReason(eval, 8, "接近掉层，刷新优先级抬高")
+            elseif remaining < refreshWindow then
+                AddReason(eval, 22, "Boss破甲进入刷新窗口，由 tank 提前择机续层")
+                if remaining <= urgentWindow then
+                    AddReason(eval, 18, "破甲剩余已偏短，应明显抬高刷新优先级")
+                end
+                if remaining <= 3.0 then
+                    AddReason(eval, 16, "接近掉层，当前GCD应强烈倾向补 Sunder")
+                elseif remaining <= 6.0 then
+                    AddReason(eval, 10, "已进入高风险刷新区间，不应继续拖延")
                 end
                 if threat.status >= 2 and threat.scaledPct >= 95 then
-                    AddReason(eval, 12, "仇恨稳定，适合用当前GCD刷新破甲")
+                    AddReason(eval, 16, "仇恨稳定，适合用当前GCD刷新破甲")
                 else
-                    AddReason(eval, -8, "仇恨未完全站稳，刷新应再等等")
+                    AddReason(eval, -6, "仇恨未完全站稳，刷新应稍后但不能拖掉层")
                 end
                 if context.cooldown.ss > context.horizonSec and context.cooldown.rev > context.horizonSec then
-                    AddReason(eval, 6, "主威胁技能暂不在窗口，当前补刷新损失更小")
+                    AddReason(eval, 8, "主威胁技能暂不在窗口，当前补刷新损失更小")
                 else
-                    AddReason(eval, -4, "高优先仇恨技能就绪，稍后刷新更优")
+                    AddReason(eval, -2, "高优先仇恨技能就绪，但仍需兼顾破甲掉层风险")
                 end
             else
                 Reject(eval, "Boss破甲刷新时机未到")
@@ -2337,12 +2499,13 @@ local function ApplyTpsSunderDuty(eval, context, cfg, sunderState)
 
     if duty == "maintain_only" then
         if context.targetBossLike then
+            local refreshWindow = math.max(cfg.sunderRefreshSeconds + 2, 12)
             if stacks <= 0 then
                 AddReason(eval, -18, "Boss补层由 DPS 负责，tank 不抢首层")
             elseif stacks < targetStacks then
                 AddReason(eval, -8 + missingStacks, "Boss补层阶段不建议由 tank 继续叠层")
-            elseif remaining < cfg.sunderRefreshSeconds then
-                AddReason(eval, 12, "Boss5层将到期，由 tank 负责维持刷新")
+            elseif remaining < refreshWindow then
+                AddReason(eval, 16, "Boss5层进入刷新窗口，由 tank 负责维持")
             else
                 AddReason(eval, -8, "Boss刷新时机未到")
             end
@@ -2449,6 +2612,10 @@ local function BuildDpsEvaluations(context)
     local list = {}
     local threat = context.threat or ReadThreatState()
     local dpsAggressiveBonus = (threat.scaledPct > 95) and GetPolicyParam("dps_threat_aggressive_bonus", 3.0) or 0
+
+    if not context.inCombat then
+        return BuildOutOfCombatEvaluations(context)
+    end
 
     local ex = NewEval(TOKENS.EXECUTE, 95)
     ApplyCommonChecks(ex, context, {
@@ -2569,7 +2736,7 @@ local function BuildDpsEvaluations(context)
     local sunder = BuildSunderEval(context, cfg, {
         baseScore = 32,
         onPassed = function(eval)
-            local sunderState = ReadSunderState()
+            local sunderState = context.sunderState or ReadSunderState()
             ApplyDpsSunderDuty(eval, context, cfg, sunderState)
             if not eval.passed then
                 return
@@ -2617,15 +2784,23 @@ local function BuildDpsEvaluations(context)
     if ham.passed then
         local hs = context.hamstringState or { hasDebuff = false, remaining = 0 }
         local protected = false
-        if context.cooldown.bt <= (hamCfg.btProtectMs / 1000) and context.rage < (ABILITIES[TOKENS.BLOODTHIRST].rage + hamCfg.rageSafetyReserve) then
-            protected = true
-        end
-        if context.cooldown.ww <= (hamCfg.wwProtectMs / 1000) and context.rage < (ABILITIES[TOKENS.WHIRLWIND].rage + hamCfg.rageSafetyReserve) then
-            protected = true
-        end
-        if context.targetHealthPct and context.targetHealthPct <= 20 and context.cooldown.ex <= (hamCfg.exProtectMs / 1000)
-            and context.rage < (ABILITIES[TOKENS.EXECUTE].rage + hamCfg.rageSafetyReserve) then
-            protected = true
+        local perfectBaitWindow = IsPerfectHamstringBaitWindow(context)
+        if not perfectBaitWindow then
+            if context.cooldown.bt <= (hamCfg.btProtectMs / 1000)
+                and context.rage >= 26
+                and context.rage < (ABILITIES[TOKENS.BLOODTHIRST].rage + hamCfg.rageSafetyReserve) then
+                protected = true
+            end
+            if context.cooldown.ww <= (hamCfg.wwProtectMs / 1000)
+                and context.rage >= 21
+                and context.rage < (ABILITIES[TOKENS.WHIRLWIND].rage + hamCfg.rageSafetyReserve) then
+                protected = true
+            end
+            if context.targetHealthPct and context.targetHealthPct <= 20 and context.cooldown.ex <= (hamCfg.exProtectMs / 1000)
+                and context.rage >= 12
+                and context.rage < (ABILITIES[TOKENS.EXECUTE].rage + hamCfg.rageSafetyReserve) then
+                protected = true
+            end
         end
 
         if protected then
@@ -2648,6 +2823,11 @@ local function BuildDpsEvaluations(context)
             local evScore, detail = CalcHamstringEvScore(context, hamCfg)
             if detail and detail.reason then
                 Reject(ham, detail.reason)
+            elseif perfectBaitWindow and evScore >= -4 then
+                AddReason(ham, evScore + 10, string.format(
+                    "极佳双挥击窗口，允许提前断筋骗乱舞(基础EV=%.1f)",
+                    evScore
+                ))
             elseif evScore < hamCfg.minEvScore then
                 Reject(ham, string.format(
                     "骗乱舞EV不足(%.1f<%.1f, P暴击=%.2f, 自然=%.2f, 挥击值=%.2f)",
@@ -2706,7 +2886,7 @@ local function BuildTpsEvaluations(context)
     local w = context.weights or NewWeightBag()
     local list = {}
     local threat = context.threat or ReadThreatState()
-    local sunderState = ReadSunderState()
+    local sunderState = context.sunderState or ReadSunderState()
     local threatUrgency = context.threatUrgency or CalcThreatUrgency(threat)
     local survivalUrgency = context.survivalUrgency or CalcSurvivalUrgency(context.playerHealthPct)
     local tpsThreatBias = context.tpsThreatBias or CalcTpsThreatBias(threat)
@@ -2715,6 +2895,10 @@ local function BuildTpsEvaluations(context)
     local shieldSlamUrgencyCoeff = GetPolicyParam("shield_slam_urgency_coeff", 1.4)
     local bloodthirstUrgencyCoeff = GetPolicyParam("bloodthirst_tps_urgency_coeff", 0.6)
     local lastStandSurvivalCoeff = GetPolicyParam("last_stand_survival_coeff", 1.7)
+
+    if not context.inCombat then
+        return BuildOutOfCombatEvaluations(context)
+    end
 
     local ls = NewEval(TOKENS.LAST_STAND, 120)
     ApplyCommonChecks(ls, context, {
@@ -3009,7 +3193,7 @@ local function IsActionToken(token)
     return token and token ~= TOKENS.WAIT and token ~= TOKENS.NONE
 end
 
-local function FindEvalByToken(list, token)
+FindEvalByToken = function(list, token)
     if not list or not token then
         return nil
     end
@@ -3321,6 +3505,10 @@ local function BuildOffGcdEvaluations(context, mainEvaluations)
 end
 
 local function BuildDumpEvaluations(context)
+    if not context.inCombat then
+        return {}, 0
+    end
+
     local w = context.weights or NewWeightBag()
     local qCfg = Decision.GetHsQueueConfig()
     local threat = context.threat or ReadThreatState()
@@ -3477,6 +3665,1031 @@ local function BuildDumpEvaluations(context)
     return list, reserve
 end
 
+local function ClonePlannerValue(value)
+    if type(value) ~= "table" then
+        return value
+    end
+    local out = {}
+    for k, v in pairs(value) do
+        out[k] = ClonePlannerValue(v)
+    end
+    return out
+end
+
+local function BuildPlannerState(context)
+    local state = ClonePlannerValue(context)
+    state.queue = state.queue or {}
+    state.cooldown = state.cooldown or {}
+    state.buffs = state.buffs or {}
+    state.sunderState = state.sunderState or { stacks = 0, remaining = 0, hasDebuff = false }
+    state.hamstringState = state.hamstringState or { hasDebuff = false, remaining = 0 }
+    state.battleShoutState = state.battleShoutState or {
+        selfActive = state.buffs.battleShout and true or false,
+        selfRemaining = state.buffs.battleShoutRemaining or 0,
+        refreshSeconds = state.config and state.config.battleShoutRefreshSeconds or 12,
+        effectUnits = 1,
+        threatUnits = 1,
+        inRangeUnits = 1,
+        missingUnits = state.buffs.battleShout and 0 or 1,
+        buffedUnits = state.buffs.battleShout and 1 or 0,
+    }
+    state.threat = state.threat or {
+        status = 3,
+        scaledPct = 110,
+        isTanking = state.mode == "TPS_SURVIVAL",
+    }
+    return state
+end
+
+local function GetPlannerCooldownDuration(token)
+    return TOKEN_BASE_COOLDOWN[token] or 0
+end
+
+local function SetPlannerCooldown(state, token)
+    local key = TOKEN_COOLDOWN_KEY[token]
+    if not key then
+        return
+    end
+    state.cooldown[key] = math.max(state.cooldown[key] or 0, GetPlannerCooldownDuration(token))
+end
+
+local function RefreshPlannerUrgency(state)
+    state.threatUrgency = CalcThreatUrgency(state.threat or {})
+    state.survivalUrgency = CalcSurvivalUrgency(state.playerHealthPct or 100)
+    state.tpsThreatBias = CalcTpsThreatBias(state.threat or {})
+end
+
+local function RefreshPlannerBattleShoutState(state)
+    local shoutState = state.battleShoutState or {}
+    local refreshSeconds = shoutState.refreshSeconds or (state.config and state.config.battleShoutRefreshSeconds) or 12
+    local selfRemaining = math.max(tonumber(shoutState.selfRemaining) or 0, 0)
+    local selfActive = selfRemaining > 0
+    shoutState.refreshSeconds = refreshSeconds
+    shoutState.selfRemaining = selfRemaining
+    shoutState.selfActive = selfActive
+    shoutState.selfNeedsCast = (not selfActive) or (selfRemaining <= refreshSeconds)
+    shoutState.effectUnits = selfActive and math.max(tonumber(shoutState.effectUnits) or 1, 1) or math.max(tonumber(shoutState.missingUnits) or 1, 1)
+    shoutState.threatUnits = math.max(tonumber(shoutState.threatUnits) or shoutState.effectUnits or 1, 1)
+    shoutState.inRangeUnits = math.max(tonumber(shoutState.inRangeUnits) or shoutState.effectUnits or 1, 1)
+    shoutState.buffedUnits = selfActive and math.max(tonumber(shoutState.buffedUnits) or 1, 1) or 0
+    shoutState.missingUnits = selfActive and 0 or math.max(tonumber(shoutState.missingUnits) or 1, 1)
+    shoutState.shouldCast = shoutState.selfNeedsCast or (state.mode == "TPS_SURVIVAL" and (shoutState.effectUnits or 0) > 0)
+    state.battleShoutState = shoutState
+    state.buffs.battleShout = selfActive
+    state.buffs.battleShoutRemaining = selfRemaining
+end
+
+local function AdvancePlannerAuras(state, delta)
+    if delta <= 0 then
+        RefreshPlannerBattleShoutState(state)
+        return
+    end
+    local sunderState = state.sunderState or {}
+    if (sunderState.remaining or 0) > 0 then
+        sunderState.remaining = math.max((sunderState.remaining or 0) - delta, 0)
+        if sunderState.remaining <= 0 then
+            sunderState.remaining = 0
+            sunderState.hasDebuff = false
+            sunderState.stacks = 0
+        end
+    end
+    state.sunderState = sunderState
+
+    local hamState = state.hamstringState or {}
+    if (hamState.remaining or 0) > 0 then
+        hamState.remaining = math.max((hamState.remaining or 0) - delta, 0)
+        if hamState.remaining <= 0 then
+            hamState.remaining = 0
+            hamState.hasDebuff = false
+        end
+    end
+    state.hamstringState = hamState
+
+    local buffs = state.buffs or {}
+    if buffs.bloodrage then
+        buffs.bloodrageRemaining = math.max((buffs.bloodrageRemaining or 10) - delta, 0)
+        if buffs.bloodrageRemaining <= 0 then
+            buffs.bloodrage = false
+        end
+    end
+    state.buffs = buffs
+
+    local shoutState = state.battleShoutState or {}
+    shoutState.selfRemaining = math.max((shoutState.selfRemaining or 0) - delta, 0)
+    RefreshPlannerBattleShoutState(state)
+end
+
+local function AdvancePlannerTimers(state, delta)
+    local dt = math.max(delta or 0, 0)
+    state.now = (state.now or 0) + dt
+    state.gcdRem = math.max((state.gcdRem or 0) - dt, 0)
+    for key, value in pairs(state.cooldown or {}) do
+        if type(value) == "number" then
+            state.cooldown[key] = math.max(value - dt, 0)
+        end
+    end
+
+    local queue = state.queue or {}
+    local swing = state.swing or {}
+    local timeToMain = tonumber(queue.timeToMain or swing.timeToMain) or 99
+    local timeToOff = tonumber(queue.timeToOff or swing.timeToOff) or 99
+    local mainSwingLanded = timeToMain > 0.0001 and dt >= timeToMain
+    local offSwingLanded = timeToOff > 0.0001 and dt >= timeToOff
+    local queuedDumpConsumed = false
+    timeToMain = math.max(timeToMain - dt, 0)
+    timeToOff = math.max(timeToOff - dt, 0)
+    if queue.queuedDumpToken and timeToMain <= 0.0001 then
+        queuedDumpConsumed = true
+        queue.queuedDumpToken = nil
+        queue.hsQueued = false
+        queue.cleaveQueued = false
+        local mainSpeed = tonumber(state.equipment and state.equipment.speedMain) or 2.8
+        timeToMain = mainSpeed
+    end
+    if timeToMain <= 0.0001 then
+        local mainSpeed = tonumber(state.equipment and state.equipment.speedMain) or 2.8
+        timeToMain = mainSpeed
+    end
+    if timeToOff <= 0.0001 then
+        local offSpeed = tonumber(state.equipment and state.equipment.speedOff) or (tonumber(state.equipment and state.equipment.speedMain) or 2.4)
+        timeToOff = offSpeed
+    end
+    swing.timeToMain = timeToMain
+    swing.timeToOff = timeToOff
+    queue.timeToMain = timeToMain
+    queue.timeToOff = timeToOff
+    local qCfg = Decision.GetHsQueueConfig()
+    queue.queueWindowOpen = timeToMain <= ((qCfg and qCfg.queueWindowMs or 400) / 1000)
+    state.queue = queue
+    state.swing = swing
+    if mainSwingLanded and not queuedDumpConsumed then
+        state.rage = Clamp((state.rage or 0) + 12, 0, 100)
+    end
+    if offSwingLanded then
+        state.rage = Clamp((state.rage or 0) + 6, 0, 100)
+    end
+
+    AdvancePlannerAuras(state, dt)
+    RefreshPlannerUrgency(state)
+end
+
+local function ComputePlannerWaitStep(state)
+    local best = PLANNER_WAIT_STEP_MAX
+    local function take(value)
+        if type(value) == "number" and value > 0.01 then
+            best = math.min(best, value)
+        end
+    end
+    take(state.gcdRem)
+    take(state.queue and state.queue.timeToMain)
+    take(state.queue and state.queue.timeToOff)
+    take(state.cooldown and state.cooldown.bt)
+    take(state.cooldown and state.cooldown.ww)
+    take(state.cooldown and state.cooldown.ss)
+    take(state.cooldown and state.cooldown.rev)
+    take(state.cooldown and state.cooldown.taunt)
+    take(state.cooldown and state.cooldown.mb)
+    if best <= 0.01 then
+        return 0.2
+    end
+    return best
+end
+
+local function BuildPlannerBundle(state)
+    local mainEvaluations = state.mode == "TPS_SURVIVAL" and BuildTpsEvaluations(state) or BuildDpsEvaluations(state)
+    local nextEvaluations = FilterNextGcdEvaluations(mainEvaluations)
+    local dumpEvaluations, reserveRage = BuildDumpEvaluations(state)
+    local offGcdEvaluations = BuildOffGcdEvaluations(state, mainEvaluations)
+    return {
+        mainEvaluations = mainEvaluations,
+        nextEvaluations = nextEvaluations,
+        dumpEvaluations = dumpEvaluations,
+        offGcdEvaluations = offGcdEvaluations,
+        reserveRage = reserveRage,
+    }
+end
+
+local function BuildPlannerWaitCandidate(bundle)
+    local nextWait = FindEvalByToken(bundle.nextEvaluations, TOKENS.WAIT)
+    local holdEval = FindEvalByToken(bundle.dumpEvaluations, TOKENS.HOLD)
+    local best = nextWait
+    local channel = "gcd"
+    if holdEval and ((not best) or (holdEval.score > best.score)) then
+        best = holdEval
+        channel = "wait"
+    end
+    if not best then
+        return nil
+    end
+    return {
+        token = TOKENS.WAIT,
+        channel = channel,
+        score = best.score,
+        rawScore = best.score,
+        passed = best.passed,
+        reasons = best.reasons,
+        sourceEval = best,
+        reason = best.reasons and best.reasons[1] or "等待更优窗口",
+        rageCost = 0,
+        cooldownRem = 0,
+        rageEnough = true,
+        actionableNow = true,
+    }
+end
+
+local function CollectPlannerCandidates(state, bundle)
+    local list = {}
+    local byToken = {}
+    local queuedDumpToken = state.queue and state.queue.queuedDumpToken or nil
+    local function add(entry, channel)
+        if not entry or not entry.token then
+            return
+        end
+        if entry.token == TOKENS.NONE or entry.token == TOKENS.HOLD then
+            return
+        end
+        if (entry.token == TOKENS.HEROIC_STRIKE or entry.token == TOKENS.CLEAVE) and queuedDumpToken then
+            return
+        end
+        if not entry.passed and entry.token ~= TOKENS.WAIT then
+            return
+        end
+        local candidate = {
+            token = entry.token,
+            channel = channel,
+            score = entry.score,
+            rawScore = entry.score,
+            passed = entry.passed,
+            reasons = entry.reasons,
+            sourceEval = entry,
+            reason = entry.reasons and entry.reasons[1] or "最高分候选",
+            rageCost = GetTokenRageCost(entry.token),
+            cooldownRem = GetTokenCooldownRemaining(entry.token, state),
+            rageEnough = (state.rage or 0) >= GetTokenRageCost(entry.token),
+            actionableNow = entry.token ~= TOKENS.WAIT and entry.passed and GetTokenCooldownRemaining(entry.token, state) <= 0.05
+                and ((state.rage or 0) >= GetTokenRageCost(entry.token)),
+        }
+        local existing = byToken[candidate.token]
+        if not existing or candidate.score > existing.score then
+            if existing then
+                for i = #list, 1, -1 do
+                    if list[i].token == candidate.token then
+                        table.remove(list, i)
+                        break
+                    end
+                end
+            end
+            byToken[candidate.token] = candidate
+            table.insert(list, candidate)
+        end
+    end
+
+    for _, entry in ipairs(bundle.nextEvaluations or {}) do
+        add(entry, "gcd")
+    end
+    for _, entry in ipairs(bundle.dumpEvaluations or {}) do
+        add(entry, "dump")
+    end
+    for _, entry in ipairs(bundle.offGcdEvaluations or {}) do
+        add(entry, "offgcd")
+    end
+
+    local waitCandidate = BuildPlannerWaitCandidate(bundle)
+    if waitCandidate then
+        byToken[TOKENS.WAIT] = waitCandidate
+        table.insert(list, waitCandidate)
+    end
+
+    table.sort(list, function(a, b)
+        if a.channel ~= b.channel and a.token == TOKENS.WAIT then
+            return false
+        end
+        if a.channel ~= b.channel and b.token == TOKENS.WAIT then
+            return true
+        end
+        if a.score == b.score then
+            return a.token < b.token
+        end
+        return a.score > b.score
+    end)
+    return list
+end
+
+local function HasPremiumTokenSoon(state)
+    local cooldown = state.cooldown or {}
+    if state.mode == "TPS_SURVIVAL" then
+        return (cooldown.ss or 99) <= 0.45 or (cooldown.rev or 99) <= 0.35 or (cooldown.taunt or 99) <= 0.35
+            or (cooldown.mb or 99) <= 0.45
+    end
+    return (cooldown.bt or 99) <= 0.45 or (cooldown.ww or 99) <= 0.55
+        or ((state.targetHealthPct or 100) <= 20 and (cooldown.ex or 99) <= 0.35)
+end
+
+local function EstimatePlannerRageBefore(state, seconds)
+    local rage = tonumber(state and state.rage) or 0
+    local queue = state and state.queue or {}
+    local equipment = state and state.equipment or {}
+    if (tonumber(queue.timeToMain) or math.huge) <= seconds then
+        rage = rage + 12
+    end
+    if equipment.hasOffhandWeapon and (tonumber(queue.timeToOff) or math.huge) <= seconds then
+        rage = rage + 6
+    end
+    return Clamp(rage, 0, 100)
+end
+
+local function IsPlannerBloodrageRedundant(state)
+    if not state or (state.rage or 0) >= 30 then
+        return false
+    end
+    local cooldown = state.cooldown or {}
+    local soonest = math.huge
+    local needed = 0
+    if state.mode == "TPS_SURVIVAL" then
+        if (cooldown.ss or math.huge) < soonest then
+            soonest = cooldown.ss or math.huge
+            needed = GetTokenRageCost(TOKENS.SHIELD_SLAM)
+        end
+        if (cooldown.rev or math.huge) < soonest then
+            soonest = cooldown.rev or math.huge
+            needed = GetTokenRageCost(TOKENS.REVENGE)
+        end
+        if (cooldown.mb or math.huge) < soonest then
+            soonest = cooldown.mb or math.huge
+            needed = GetTokenRageCost(TOKENS.MOCKING_BLOW)
+        end
+    else
+        if (cooldown.bt or math.huge) < soonest then
+            soonest = cooldown.bt or math.huge
+            needed = GetTokenRageCost(TOKENS.BLOODTHIRST)
+        end
+        if (state.hostileCount or 1) >= 2 and (cooldown.ww or math.huge) < soonest then
+            soonest = cooldown.ww or math.huge
+            needed = GetTokenRageCost(TOKENS.WHIRLWIND)
+        end
+        if (state.targetHealthPct or 100) <= 20 and (cooldown.ex or math.huge) < soonest then
+            soonest = cooldown.ex or math.huge
+            needed = GetTokenRageCost(TOKENS.EXECUTE)
+        end
+    end
+    if soonest == math.huge or needed <= 0 or soonest > 0.35 then
+        return false
+    end
+    return EstimatePlannerRageBefore(state, soonest + 0.02) >= needed
+end
+
+local function CalcPlannerDumpPairBonus(state, candidate)
+    if not candidate or candidate.channel ~= "dump" then
+        return 0
+    end
+    local queue = state.queue or {}
+    if not queue.queueWindowOpen then
+        return 0
+    end
+    local cooldown = state.cooldown or {}
+    local postRage = math.max((state.rage or 0) - (candidate.rageCost or 0), 0)
+    local bonus = 0
+    local timeToMain = tonumber(queue.timeToMain) or math.huge
+
+    if timeToMain <= 0.28 then
+        bonus = bonus + 4
+    end
+    if (state.rage or 0) >= 55 then
+        bonus = bonus + 4
+    end
+
+    if state.mode == "TPS_SURVIVAL" then
+        if (cooldown.ss or 99) <= 0.05 and postRage >= GetTokenRageCost(TOKENS.SHIELD_SLAM) then
+            bonus = bonus + 10
+        elseif (cooldown.rev or 99) <= 0.05 and postRage >= GetTokenRageCost(TOKENS.REVENGE) then
+            bonus = bonus + 8
+        elseif ((cooldown.taunt or 99) <= 0.05 or (cooldown.mb or 99) <= 0.05) and postRage >= 10 then
+            bonus = bonus + 8
+        end
+        return bonus
+    end
+
+    if (cooldown.bt or 99) <= 0.05 and postRage >= GetTokenRageCost(TOKENS.BLOODTHIRST) then
+        bonus = bonus + 12
+    elseif (state.hostileCount or 1) >= 2 and (cooldown.ww or 99) <= 0.05 and postRage >= GetTokenRageCost(TOKENS.WHIRLWIND) then
+        bonus = bonus + 10
+    elseif (state.targetHealthPct or 100) <= 20 and (cooldown.ex or 99) <= 0.05 and postRage >= GetTokenRageCost(TOKENS.EXECUTE) then
+        bonus = bonus + 12
+    end
+    return bonus
+end
+
+local function CalcPlannerStateBonus(state, candidate)
+    local bonus = 0
+    if candidate.channel == "dump" and state.queue and state.queue.queueWindowOpen then
+        bonus = bonus + 6
+        bonus = bonus + CalcPlannerDumpPairBonus(state, candidate)
+    end
+    if candidate.token == TOKENS.BLOODRAGE and (state.rage or 0) <= 20 then
+        bonus = bonus + (HasPremiumTokenSoon(state) and 6 or 3)
+    elseif candidate.token == TOKENS.SHIELD_BLOCK then
+        bonus = bonus + math.floor((state.survivalUrgency or 0) * 0.2)
+    elseif candidate.token == TOKENS.LAST_STAND then
+        bonus = bonus + math.floor((state.survivalUrgency or 0) * 0.4)
+    elseif candidate.token == TOKENS.SUNDER_ARMOR then
+        local sunderState = state.sunderState or {}
+        local refreshWindow = math.max((state.config and state.config.sunderRefreshSeconds or 10) + 2, 12)
+        if state.mode == "TPS_SURVIVAL" and state.targetBossLike and (sunderState.stacks or 0) >= ((state.config and state.config.sunderTargetStacks) or 5)
+            and (sunderState.remaining or 0) < refreshWindow then
+            bonus = bonus + 8
+        end
+    elseif candidate.token == TOKENS.TAUNT then
+        bonus = bonus + 10
+    elseif candidate.token == TOKENS.MOCKING_BLOW then
+        bonus = bonus + 4
+    end
+    return bonus
+end
+
+local function CalcPlannerExecutionPenalty(state, candidate)
+    local penalty = 0
+    local cost = candidate.rageCost or 0
+    if candidate.token ~= TOKENS.WAIT then
+        penalty = penalty + (cost * 0.08)
+    end
+    if candidate.channel == "dump" and state.queue and not state.queue.queueWindowOpen then
+        penalty = penalty + 6
+    end
+
+    local postRage = math.max((state.rage or 0) - cost, 0)
+    if candidate.token == TOKENS.BLOODRAGE then
+        postRage = Clamp(postRage + 10, 0, 100)
+        if IsPlannerBloodrageRedundant(state) then
+            penalty = penalty + 18
+        end
+    end
+    local cooldown = state.cooldown or {}
+    local function blockSoon(token, remaining, reserve)
+        if candidate.token == token then
+            return
+        end
+        if remaining <= reserve and postRage < GetTokenRageCost(token) then
+            penalty = penalty + 28
+        end
+    end
+    if state.mode == "TPS_SURVIVAL" then
+        blockSoon(TOKENS.SHIELD_SLAM, cooldown.ss or 99, 0.45)
+        blockSoon(TOKENS.REVENGE, cooldown.rev or 99, 0.35)
+        blockSoon(TOKENS.TAUNT, cooldown.taunt or 99, 0.35)
+        blockSoon(TOKENS.MOCKING_BLOW, cooldown.mb or 99, 0.45)
+        if candidate.channel == "dump" and ((cooldown.ss or 99) <= 0.45 or (cooldown.rev or 99) <= 0.35) then
+            penalty = penalty + 8
+        end
+    else
+        blockSoon(TOKENS.BLOODTHIRST, cooldown.bt or 99, 0.45)
+        if not (candidate.token == TOKENS.BLOODTHIRST and (state.hostileCount or 1) <= 1) then
+            blockSoon(TOKENS.WHIRLWIND, cooldown.ww or 99, 0.55)
+        end
+        if (state.targetHealthPct or 100) <= 20 then
+            blockSoon(TOKENS.EXECUTE, cooldown.ex or 99, 0.35)
+        end
+    end
+    if candidate.token == TOKENS.WAIT then
+        penalty = penalty + 8
+    end
+    return penalty
+end
+
+local function ApplyVirtualAction(state, candidate)
+    local nextState = BuildPlannerState(state)
+    local token = candidate and candidate.token or TOKENS.NONE
+    if token == TOKENS.NONE then
+        return nextState
+    end
+
+    if token == TOKENS.WAIT or token == TOKENS.HOLD then
+        AdvancePlannerTimers(nextState, ComputePlannerWaitStep(nextState))
+        return nextState
+    end
+
+    local rageCost = GetTokenRageCost(token)
+    nextState.rage = Clamp((nextState.rage or 0) - rageCost, 0, 100)
+
+    if candidate.channel == "dump" then
+        nextState.queue.queuedDumpToken = token
+        nextState.queue.hsQueued = token == TOKENS.HEROIC_STRIKE
+        nextState.queue.cleaveQueued = token == TOKENS.CLEAVE
+        nextState.queue.queueWindowOpen = false
+        nextState.queue.timeToMain = math.max(nextState.queue.timeToMain or 0, 0.05)
+        RefreshPlannerUrgency(nextState)
+        return nextState
+    end
+
+    if candidate.channel == "offgcd" then
+        SetPlannerCooldown(nextState, token)
+        if token == TOKENS.BLOODRAGE then
+            nextState.rage = Clamp((nextState.rage or 0) + 10, 0, 100)
+            nextState.buffs.bloodrage = true
+            nextState.buffs.bloodrageRemaining = 10
+        elseif token == TOKENS.SHIELD_BLOCK then
+            nextState.survivalUrgency = math.max((nextState.survivalUrgency or 0) - 12, 0)
+        elseif token == TOKENS.LAST_STAND then
+            nextState.playerHealthPct = math.min((nextState.playerHealthPct or 100) + 18, 100)
+        end
+        RefreshPlannerUrgency(nextState)
+        return nextState
+    end
+
+    nextState.gcdRem = math.max(nextState.gcdRem or 0, PLANNER_GCD_SECONDS)
+    SetPlannerCooldown(nextState, token)
+
+    if token == TOKENS.BATTLE_SHOUT then
+        nextState.battleShoutState.selfRemaining = 120
+        nextState.battleShoutState.selfActive = true
+        nextState.battleShoutState.effectUnits = math.max(nextState.battleShoutState.effectUnits or 1, 1)
+        nextState.battleShoutState.threatUnits = math.max(nextState.battleShoutState.threatUnits or nextState.battleShoutState.effectUnits or 1, 1)
+        RefreshPlannerBattleShoutState(nextState)
+    elseif token == TOKENS.SUNDER_ARMOR then
+        local targetStacks = (nextState.config and nextState.config.sunderTargetStacks) or 5
+        nextState.sunderState.hasDebuff = true
+        nextState.sunderState.stacks = math.min((nextState.sunderState.stacks or 0) + 1, targetStacks)
+        nextState.sunderState.remaining = 30
+    elseif token == TOKENS.HAMSTRING then
+        local hamCfg = Decision.GetHamstringConfig()
+        nextState.hamstringState.hasDebuff = true
+        nextState.hamstringState.remaining = hamCfg.refreshSeconds or 15
+    elseif token == TOKENS.TAUNT then
+        nextState.threat.isTanking = true
+        nextState.threat.status = 3
+        nextState.threat.scaledPct = 110
+    elseif token == TOKENS.MOCKING_BLOW then
+        nextState.threat.isTanking = true
+        nextState.threat.status = math.max(nextState.threat.status or 0, 2)
+        nextState.threat.scaledPct = math.max(nextState.threat.scaledPct or 0, 96)
+    elseif token == TOKENS.LAST_STAND then
+        nextState.playerHealthPct = math.min((nextState.playerHealthPct or 100) + 18, 100)
+    end
+
+    RefreshPlannerUrgency(nextState)
+    return nextState
+end
+
+local function DeterminePlannerDepth(state)
+    if HasPremiumTokenSoon(state) then
+        return PLANNER_DEEP_DEPTH
+    end
+    if state.queue and ((state.queue.queuedDumpToken ~= nil) or state.queue.queueWindowOpen) then
+        return PLANNER_DEEP_DEPTH
+    end
+    if (state.gcdRem or 0) > 0.05 then
+        return PLANNER_DEEP_DEPTH
+    end
+    return PLANNER_DEFAULT_DEPTH
+end
+
+local function SearchBestAction(state, depth)
+    if depth <= 0 then
+        return nil, 0
+    end
+    local bundle = BuildPlannerBundle(state)
+    local candidates = CollectPlannerCandidates(state, bundle)
+    if #candidates == 0 then
+        return nil, 0
+    end
+
+    local bestCandidate = nil
+    local bestValue = -1e9
+    for _, candidate in ipairs(candidates) do
+        local immediateValue = candidate.rawScore or 0
+        if candidate.channel == "offgcd" then
+            immediateValue = immediateValue * 0.72
+        elseif candidate.channel == "dump" then
+            immediateValue = immediateValue * 0.88
+        elseif candidate.token == TOKENS.WAIT then
+            immediateValue = immediateValue - 4
+        end
+        local penalty = CalcPlannerExecutionPenalty(state, candidate)
+        local stateBonus = CalcPlannerStateBonus(state, candidate)
+        local nextState = ApplyVirtualAction(state, candidate)
+        local futureValue = 0
+        if depth > 1 then
+            local _, nested = SearchBestAction(nextState, depth - 1)
+            futureValue = nested * PLANNER_FUTURE_DECAY
+        end
+        local totalValue = immediateValue + futureValue - penalty + stateBonus
+        if (not bestCandidate) or totalValue > bestValue then
+            bestCandidate = candidate
+            bestValue = totalValue
+        end
+    end
+    if bestCandidate then
+        bestCandidate.sequenceValue = bestValue
+    end
+    return bestCandidate, bestValue
+end
+
+local function PromotePlannerDisplayCandidate(state)
+    local probeState = BuildPlannerState(state)
+    local totalWait = 0
+    for _ = 1, 3 do
+        local candidate = SearchBestAction(probeState, DeterminePlannerDepth(probeState))
+        if (not candidate) or candidate.token ~= TOKENS.WAIT then
+            return candidate, probeState
+        end
+        local premiumSoon = HasPremiumTokenSoon(probeState)
+        local nextState = ApplyVirtualAction(probeState, candidate)
+        totalWait = totalWait + math.max((nextState.now or 0) - (probeState.now or 0), 0.2)
+        probeState = nextState
+        if (not premiumSoon) or totalWait >= 1.25 then
+            break
+        end
+    end
+    local candidate = SearchBestAction(probeState, DeterminePlannerDepth(probeState))
+    return candidate, probeState
+end
+
+local function BuildQueueIndicator(context)
+    local queuedToken = context.queue and context.queue.queuedDumpToken or nil
+    if not queuedToken or queuedToken == TOKENS.HOLD then
+        return nil
+    end
+    return {
+        token = queuedToken,
+        channel = "dump",
+        queued = true,
+        glow = true,
+        actionableNow = true,
+        reason = "Dump 已进入下一次主手挥击队列",
+        rageCost = GetTokenRageCost(queuedToken),
+        cooldownRem = 0,
+        rageEnough = true,
+    }
+end
+
+local function IsDisplayablePlannedToken(token)
+    return token and token ~= TOKENS.NONE and token ~= TOKENS.HOLD
+end
+
+local function PlanRecommendationSequence(context)
+    local state = BuildPlannerState(context)
+    local ranked = {}
+    local seen = {}
+    for slot = 1, 3 do
+        local candidate = SearchBestAction(state, DeterminePlannerDepth(state))
+        if candidate and candidate.token == TOKENS.WAIT then
+            local promotedCandidate, promotedState = PromotePlannerDisplayCandidate(state)
+            if promotedCandidate and promotedCandidate.token and promotedCandidate.token ~= TOKENS.WAIT then
+                candidate = promotedCandidate
+                state = promotedState
+            end
+        end
+        if not candidate or (not IsDisplayablePlannedToken(candidate.token)) then
+            break
+        end
+        ranked[slot] = {
+            token = candidate.token,
+            channel = candidate.channel,
+            reason = candidate.reason,
+            rawScore = candidate.rawScore,
+            sequenceValue = candidate.sequenceValue or candidate.rawScore,
+            rageCost = candidate.rageCost,
+            cooldownRem = candidate.cooldownRem,
+            rageEnough = candidate.rageEnough,
+            actionableNow = candidate.actionableNow,
+            passed = candidate.passed,
+        }
+        seen[candidate.token] = true
+        state = ApplyVirtualAction(state, candidate)
+    end
+    if #ranked < 3 and #ranked > 1 then
+        ranked = { ranked[1] }
+    end
+    return ranked, BuildQueueIndicator(context)
+end
+
+local function GetPassedEvalByToken(list, token)
+    local eval = FindEvalByToken(list, token)
+    if eval and eval.passed then
+        return eval
+    end
+    return nil
+end
+
+local function PickHigherScoreEval(a, b)
+    if a and b then
+        return (tonumber(a.score) or 0) >= (tonumber(b.score) or 0) and a or b
+    end
+    return a or b
+end
+
+local function BuildRecommendedEntry(context, token, eval, channel, reason)
+    if not token or not eval then
+        return nil
+    end
+    return {
+        token = token,
+        channel = channel,
+        reason = reason or (eval.reasons and eval.reasons[1]) or "最高分候选",
+        rawScore = eval.score,
+        score = eval.score,
+        rageCost = GetTokenRageCost(token),
+        cooldownRem = GetTokenCooldownRemaining(token, context),
+        rageEnough = (context.rage or 0) >= GetTokenRageCost(token),
+        actionableNow = true,
+        passed = true,
+    }
+end
+
+local function ShouldRecommendDpsDump(context, dumpEval, premiumEval)
+    if not dumpEval or not dumpEval.passed then
+        return false
+    end
+    if context.queue and context.queue.queuedDumpToken and context.queue.queuedDumpToken ~= TOKENS.HOLD then
+        return false
+    end
+    if not (context.queue and context.queue.queueWindowOpen) then
+        return false
+    end
+    if (context.gcdRem or 0) > 0.05 then
+        return true
+    end
+    if premiumEval and premiumEval.passed then
+        return true
+    end
+    return (context.rage or 0) >= 55 or ((context.queue and context.queue.timeToMain) or 99) <= 0.28
+end
+
+local function ShouldRecommendTpsDump(context, dumpEval, revEval, ssEval, tauntEval, mbEval)
+    if not dumpEval or not dumpEval.passed then
+        return false
+    end
+    if context.queue and context.queue.queuedDumpToken and context.queue.queuedDumpToken ~= TOKENS.HOLD then
+        return false
+    end
+    if not (context.queue and context.queue.queueWindowOpen) then
+        return false
+    end
+    if (context.threat and ((context.threat.status or 0) <= 1 or (context.threat.scaledPct or 0) < 95)) then
+        return false
+    end
+    if (tauntEval and tauntEval.passed) or (mbEval and mbEval.passed) or (revEval and revEval.passed) or (ssEval and ssEval.passed) then
+        return false
+    end
+    return true
+end
+
+local function SelectDpsPrimaryEval(context, nextEvaluations)
+    local bt = GetPassedEvalByToken(nextEvaluations, TOKENS.BLOODTHIRST)
+    local ww = GetPassedEvalByToken(nextEvaluations, TOKENS.WHIRLWIND)
+    local ex = GetPassedEvalByToken(nextEvaluations, TOKENS.EXECUTE)
+
+    if (context.hostileCount or 1) >= 2 then
+        return ww or bt or ex
+    end
+    if context.targetHealthPct and context.targetHealthPct <= 20 then
+        return PickHigherScoreEval(ex, bt) or ww
+    end
+    return bt or ww or ex
+end
+
+local function BuildCurrentRecommendedAction(context, nextEvaluations, dumpEvaluations, offGcdEvaluations)
+    local queueIndicator = BuildQueueIndicator(context)
+    local bestDumpToken, bestDumpReason, bestDumpEval = PickBest(dumpEvaluations)
+    if not bestDumpEval or not bestDumpEval.passed or bestDumpToken == TOKENS.HOLD then
+        bestDumpToken, bestDumpReason, bestDumpEval = nil, nil, nil
+    end
+
+    if context.mode == "DPS" then
+        local bloodrageEval = GetPassedEvalByToken(offGcdEvaluations, TOKENS.BLOODRAGE)
+        local premiumEval = SelectDpsPrimaryEval(context, nextEvaluations)
+        local sunderEval = GetPassedEvalByToken(nextEvaluations, TOKENS.SUNDER_ARMOR)
+        local shoutEval = GetPassedEvalByToken(nextEvaluations, TOKENS.BATTLE_SHOUT)
+        local hamEval = GetPassedEvalByToken(nextEvaluations, TOKENS.HAMSTRING)
+
+        if bloodrageEval and not premiumEval and (context.rage or 0) < 30 and not IsPlannerBloodrageRedundant(context) then
+            return BuildRecommendedEntry(context, TOKENS.BLOODRAGE, bloodrageEval, "offgcd"), queueIndicator
+        end
+        if ShouldRecommendDpsDump(context, bestDumpEval, premiumEval) then
+            return BuildRecommendedEntry(context, bestDumpToken, bestDumpEval, "dump", bestDumpReason), queueIndicator
+        end
+        if premiumEval then
+            return BuildRecommendedEntry(context, premiumEval.token, premiumEval, "gcd"), queueIndicator
+        end
+        if bloodrageEval and (context.rage or 0) < 30 and not IsPlannerBloodrageRedundant(context) then
+            return BuildRecommendedEntry(context, TOKENS.BLOODRAGE, bloodrageEval, "offgcd"), queueIndicator
+        end
+        if sunderEval then
+            return BuildRecommendedEntry(context, TOKENS.SUNDER_ARMOR, sunderEval, "gcd"), queueIndicator
+        end
+        if shoutEval then
+            return BuildRecommendedEntry(context, TOKENS.BATTLE_SHOUT, shoutEval, "gcd"), queueIndicator
+        end
+        if hamEval then
+            return BuildRecommendedEntry(context, TOKENS.HAMSTRING, hamEval, "gcd"), queueIndicator
+        end
+        if bestDumpEval then
+            return BuildRecommendedEntry(context, bestDumpToken, bestDumpEval, "dump", bestDumpReason), queueIndicator
+        end
+        return nil, queueIndicator
+    end
+
+    local lsEval = GetPassedEvalByToken(offGcdEvaluations, TOKENS.LAST_STAND)
+    local sbEval = GetPassedEvalByToken(offGcdEvaluations, TOKENS.SHIELD_BLOCK)
+    local tauntEval = GetPassedEvalByToken(nextEvaluations, TOKENS.TAUNT)
+    local mbEval = GetPassedEvalByToken(nextEvaluations, TOKENS.MOCKING_BLOW)
+    local revEval = GetPassedEvalByToken(nextEvaluations, TOKENS.REVENGE)
+    local ssEval = GetPassedEvalByToken(nextEvaluations, TOKENS.SHIELD_SLAM)
+    local sunderEval = GetPassedEvalByToken(nextEvaluations, TOKENS.SUNDER_ARMOR)
+    local btEval = GetPassedEvalByToken(nextEvaluations, TOKENS.BLOODTHIRST)
+    local shoutEval = GetPassedEvalByToken(nextEvaluations, TOKENS.BATTLE_SHOUT)
+    local bloodrageEval = GetPassedEvalByToken(offGcdEvaluations, TOKENS.BLOODRAGE)
+
+    if lsEval then
+        return BuildRecommendedEntry(context, TOKENS.LAST_STAND, lsEval, "offgcd"), queueIndicator
+    end
+    if tauntEval then
+        return BuildRecommendedEntry(context, TOKENS.TAUNT, tauntEval, "gcd"), queueIndicator
+    end
+    if mbEval then
+        return BuildRecommendedEntry(context, TOKENS.MOCKING_BLOW, mbEval, "gcd"), queueIndicator
+    end
+    if sbEval and context.threat and (context.threat.status or 0) >= 2 then
+        return BuildRecommendedEntry(context, TOKENS.SHIELD_BLOCK, sbEval, "offgcd"), queueIndicator
+    end
+    if ShouldRecommendTpsDump(context, bestDumpEval, revEval, ssEval, tauntEval, mbEval) then
+        return BuildRecommendedEntry(context, bestDumpToken, bestDumpEval, "dump", bestDumpReason), queueIndicator
+    end
+    if revEval then
+        return BuildRecommendedEntry(context, TOKENS.REVENGE, revEval, "gcd"), queueIndicator
+    end
+    if ssEval then
+        return BuildRecommendedEntry(context, TOKENS.SHIELD_SLAM, ssEval, "gcd"), queueIndicator
+    end
+    if sunderEval then
+        return BuildRecommendedEntry(context, TOKENS.SUNDER_ARMOR, sunderEval, "gcd"), queueIndicator
+    end
+    if btEval then
+        return BuildRecommendedEntry(context, TOKENS.BLOODTHIRST, btEval, "gcd"), queueIndicator
+    end
+    if shoutEval then
+        return BuildRecommendedEntry(context, TOKENS.BATTLE_SHOUT, shoutEval, "gcd"), queueIndicator
+    end
+    if bloodrageEval and not IsPlannerBloodrageRedundant(context) then
+        return BuildRecommendedEntry(context, TOKENS.BLOODRAGE, bloodrageEval, "offgcd"), queueIndicator
+    end
+    if bestDumpEval then
+        return BuildRecommendedEntry(context, bestDumpToken, bestDumpEval, "dump", bestDumpReason), queueIndicator
+    end
+    return nil, queueIndicator
+end
+
+local function AppendRecommendedEntry(list, seen, entry)
+    if not entry or not entry.token or entry.token == TOKENS.NONE or entry.token == TOKENS.HOLD or entry.token == TOKENS.WAIT then
+        return
+    end
+    if seen[entry.token] then
+        return
+    end
+    seen[entry.token] = true
+    table.insert(list, entry)
+end
+
+local function BuildOrderedDpsPremiumEvals(context, nextEvaluations)
+    local orderedTokens = {}
+    if (context.hostileCount or 1) >= 2 then
+        orderedTokens = { TOKENS.WHIRLWIND, TOKENS.BLOODTHIRST, TOKENS.EXECUTE }
+    elseif context.targetHealthPct and context.targetHealthPct <= 20 then
+        orderedTokens = { TOKENS.EXECUTE, TOKENS.BLOODTHIRST, TOKENS.WHIRLWIND }
+    else
+        orderedTokens = { TOKENS.BLOODTHIRST, TOKENS.WHIRLWIND, TOKENS.EXECUTE }
+    end
+
+    local ordered = {}
+    for _, token in ipairs(orderedTokens) do
+        local eval = GetPassedEvalByToken(nextEvaluations, token)
+        if eval then
+            table.insert(ordered, eval)
+        end
+    end
+    return ordered
+end
+
+local function BuildDpsRankedRecommendations(context, nextEvaluations, dumpEvaluations, offGcdEvaluations)
+    local ranked = {}
+    local seen = {}
+    local bestDumpToken, bestDumpReason, bestDumpEval = PickBest(dumpEvaluations)
+    if not bestDumpEval or not bestDumpEval.passed or bestDumpToken == TOKENS.HOLD then
+        bestDumpToken, bestDumpReason, bestDumpEval = nil, nil, nil
+    end
+
+    local bloodrageEval = GetPassedEvalByToken(offGcdEvaluations, TOKENS.BLOODRAGE)
+    local sunderEval = GetPassedEvalByToken(nextEvaluations, TOKENS.SUNDER_ARMOR)
+    local shoutEval = GetPassedEvalByToken(nextEvaluations, TOKENS.BATTLE_SHOUT)
+    local hamEval = GetPassedEvalByToken(nextEvaluations, TOKENS.HAMSTRING)
+    local premiumEvals = BuildOrderedDpsPremiumEvals(context, nextEvaluations)
+    local premiumEval = premiumEvals[1]
+
+    if not context.inCombat then
+        if shoutEval then
+            AppendRecommendedEntry(ranked, seen, BuildRecommendedEntry(context, TOKENS.BATTLE_SHOUT, shoutEval, "gcd"))
+        end
+        return ranked
+    end
+
+    if bloodrageEval and not premiumEval and (context.rage or 0) < 30 and not IsPlannerBloodrageRedundant(context) then
+        AppendRecommendedEntry(ranked, seen, BuildRecommendedEntry(context, TOKENS.BLOODRAGE, bloodrageEval, "offgcd"))
+    end
+    if ShouldRecommendDpsDump(context, bestDumpEval, premiumEval) then
+        AppendRecommendedEntry(ranked, seen, BuildRecommendedEntry(context, bestDumpToken, bestDumpEval, "dump", bestDumpReason))
+    end
+    for _, eval in ipairs(premiumEvals) do
+        AppendRecommendedEntry(ranked, seen, BuildRecommendedEntry(context, eval.token, eval, "gcd"))
+    end
+    if bloodrageEval and (context.rage or 0) < 30 and not IsPlannerBloodrageRedundant(context) then
+        AppendRecommendedEntry(ranked, seen, BuildRecommendedEntry(context, TOKENS.BLOODRAGE, bloodrageEval, "offgcd"))
+    end
+    if sunderEval then
+        AppendRecommendedEntry(ranked, seen, BuildRecommendedEntry(context, TOKENS.SUNDER_ARMOR, sunderEval, "gcd"))
+    end
+    if shoutEval then
+        AppendRecommendedEntry(ranked, seen, BuildRecommendedEntry(context, TOKENS.BATTLE_SHOUT, shoutEval, "gcd"))
+    end
+    if hamEval then
+        AppendRecommendedEntry(ranked, seen, BuildRecommendedEntry(context, TOKENS.HAMSTRING, hamEval, "gcd"))
+    end
+    if bestDumpEval then
+        AppendRecommendedEntry(ranked, seen, BuildRecommendedEntry(context, bestDumpToken, bestDumpEval, "dump", bestDumpReason))
+    end
+    return ranked
+end
+
+local function BuildTpsRankedRecommendations(context, nextEvaluations, dumpEvaluations, offGcdEvaluations)
+    local ranked = {}
+    local seen = {}
+    local bestDumpToken, bestDumpReason, bestDumpEval = PickBest(dumpEvaluations)
+    if not bestDumpEval or not bestDumpEval.passed or bestDumpToken == TOKENS.HOLD then
+        bestDumpToken, bestDumpReason, bestDumpEval = nil, nil, nil
+    end
+
+    local lsEval = GetPassedEvalByToken(offGcdEvaluations, TOKENS.LAST_STAND)
+    local sbEval = GetPassedEvalByToken(offGcdEvaluations, TOKENS.SHIELD_BLOCK)
+    local tauntEval = GetPassedEvalByToken(nextEvaluations, TOKENS.TAUNT)
+    local mbEval = GetPassedEvalByToken(nextEvaluations, TOKENS.MOCKING_BLOW)
+    local revEval = GetPassedEvalByToken(nextEvaluations, TOKENS.REVENGE)
+    local ssEval = GetPassedEvalByToken(nextEvaluations, TOKENS.SHIELD_SLAM)
+    local sunderEval = GetPassedEvalByToken(nextEvaluations, TOKENS.SUNDER_ARMOR)
+    local btEval = GetPassedEvalByToken(nextEvaluations, TOKENS.BLOODTHIRST)
+    local shoutEval = GetPassedEvalByToken(nextEvaluations, TOKENS.BATTLE_SHOUT)
+    local bloodrageEval = GetPassedEvalByToken(offGcdEvaluations, TOKENS.BLOODRAGE)
+
+    if not context.inCombat then
+        if shoutEval then
+            AppendRecommendedEntry(ranked, seen, BuildRecommendedEntry(context, TOKENS.BATTLE_SHOUT, shoutEval, "gcd"))
+        end
+        return ranked
+    end
+
+    if lsEval then
+        AppendRecommendedEntry(ranked, seen, BuildRecommendedEntry(context, TOKENS.LAST_STAND, lsEval, "offgcd"))
+    end
+    if tauntEval then
+        AppendRecommendedEntry(ranked, seen, BuildRecommendedEntry(context, TOKENS.TAUNT, tauntEval, "gcd"))
+    end
+    if mbEval then
+        AppendRecommendedEntry(ranked, seen, BuildRecommendedEntry(context, TOKENS.MOCKING_BLOW, mbEval, "gcd"))
+    end
+    if sbEval and context.threat and (context.threat.status or 0) >= 2 then
+        AppendRecommendedEntry(ranked, seen, BuildRecommendedEntry(context, TOKENS.SHIELD_BLOCK, sbEval, "offgcd"))
+    end
+    if ShouldRecommendTpsDump(context, bestDumpEval, revEval, ssEval, tauntEval, mbEval) then
+        AppendRecommendedEntry(ranked, seen, BuildRecommendedEntry(context, bestDumpToken, bestDumpEval, "dump", bestDumpReason))
+    end
+    if revEval then
+        AppendRecommendedEntry(ranked, seen, BuildRecommendedEntry(context, TOKENS.REVENGE, revEval, "gcd"))
+    end
+    if ssEval then
+        AppendRecommendedEntry(ranked, seen, BuildRecommendedEntry(context, TOKENS.SHIELD_SLAM, ssEval, "gcd"))
+    end
+    if sunderEval then
+        AppendRecommendedEntry(ranked, seen, BuildRecommendedEntry(context, TOKENS.SUNDER_ARMOR, sunderEval, "gcd"))
+    end
+    if btEval then
+        AppendRecommendedEntry(ranked, seen, BuildRecommendedEntry(context, TOKENS.BLOODTHIRST, btEval, "gcd"))
+    end
+    if shoutEval then
+        AppendRecommendedEntry(ranked, seen, BuildRecommendedEntry(context, TOKENS.BATTLE_SHOUT, shoutEval, "gcd"))
+    end
+    if bloodrageEval and not IsPlannerBloodrageRedundant(context) then
+        AppendRecommendedEntry(ranked, seen, BuildRecommendedEntry(context, TOKENS.BLOODRAGE, bloodrageEval, "offgcd"))
+    end
+    if bestDumpEval then
+        AppendRecommendedEntry(ranked, seen, BuildRecommendedEntry(context, bestDumpToken, bestDumpEval, "dump", bestDumpReason))
+    end
+    return ranked
+end
+
+local function BuildRankedRecommendations(context, nextEvaluations, dumpEvaluations, offGcdEvaluations)
+    if context.mode == "TPS_SURVIVAL" then
+        return BuildTpsRankedRecommendations(context, nextEvaluations, dumpEvaluations, offGcdEvaluations)
+    end
+    return BuildDpsRankedRecommendations(context, nextEvaluations, dumpEvaluations, offGcdEvaluations)
+end
+
 function Decision.GetRecommendation()
     local context = BuildContext()
     local mainEvaluations = context.mode == "TPS_SURVIVAL" and BuildTpsEvaluations(context) or BuildDpsEvaluations(context)
@@ -3528,15 +4741,52 @@ function Decision.GetRecommendation()
     local offGcdRageCost = GetTokenRageCost(offGcdSkill)
     local offGcdCooldownRem = GetTokenCooldownRemaining(offGcdSkill, context)
     local offGcdRageEnough = context.rage >= offGcdRageCost
+    local recommendedAction, queueIndicator = BuildCurrentRecommendedAction(
+        context,
+        nextEvaluations,
+        dumpEvaluations,
+        offGcdEvaluations
+    )
+    local rankedRecommendations = BuildRankedRecommendations(
+        context,
+        nextEvaluations,
+        dumpEvaluations,
+        offGcdEvaluations
+    )
+    if #rankedRecommendations > 0 then
+        recommendedAction = rankedRecommendations[1]
+    end
+
+    local compatNextSkill = nextSkill
+    local compatNextReason = reason
+    local compatDumpSkill = dumpSkill
+    local compatDumpReason = dumpReason
+    local compatOffGcdSkill = offGcdSkill
+    local compatOffGcdReason = offGcdReason
+
+    if recommendedAction and recommendedAction.channel == "gcd" and compatNextSkill == TOKENS.WAIT then
+        compatNextSkill = recommendedAction.token
+        compatNextReason = recommendedAction.reason
+    elseif recommendedAction and recommendedAction.channel == "dump" and (compatDumpSkill == TOKENS.HOLD or compatDumpSkill == TOKENS.NONE) then
+        compatDumpSkill = recommendedAction.token
+        compatDumpReason = recommendedAction.reason
+    elseif recommendedAction and recommendedAction.channel == "offgcd" and (compatOffGcdSkill == TOKENS.NONE or compatOffGcdSkill == TOKENS.WAIT) then
+        compatOffGcdSkill = recommendedAction.token
+        compatOffGcdReason = recommendedAction.reason
+    end
+    if queueIndicator and queueIndicator.token then
+        compatDumpSkill = queueIndicator.token
+        compatDumpReason = queueIndicator.reason
+    end
 
     return {
         mode = context.mode,
         stance = context.stance,
         horizonMs = context.horizonMs,
-        nextGcdSkill = nextSkill,
-        nextGcdReason = reason,
-        nextSkill = nextSkill,
-        reason = reason,
+        nextGcdSkill = compatNextSkill,
+        nextGcdReason = compatNextReason,
+        nextSkill = compatNextSkill,
+        reason = compatNextReason,
         displayNextGcdSkill = displayNextSkill,
         displayNextSkill = displayNextSkill,
         displayNextSource = displayNextSource,
@@ -3547,18 +4797,24 @@ function Decision.GetRecommendation()
             passed = displayEval and displayEval.passed or false,
         },
         habitInfo = habitInfo,
-        dumpQueueSkill = dumpSkill,
-        dumpQueueReason = dumpReason,
-        dumpSkill = dumpSkill,
-        dumpReason = dumpReason,
-        offGcdSkill = offGcdSkill,
-        offGcdReason = offGcdReason,
+        dumpQueueSkill = compatDumpSkill,
+        dumpQueueReason = compatDumpReason,
+        dumpSkill = compatDumpSkill,
+        dumpReason = compatDumpReason,
+        offGcdSkill = compatOffGcdSkill,
+        offGcdReason = compatOffGcdReason,
         offGcdState = {
             cooldownRem = offGcdCooldownRem,
             rageCost = offGcdRageCost,
             rageEnough = offGcdRageEnough,
             passed = offGcdEval and offGcdEval.passed or false,
         },
+        recommendedAction = recommendedAction,
+        recommendedSkill = recommendedAction and recommendedAction.token or TOKENS.NONE,
+        recommendedReason = recommendedAction and recommendedAction.reason or "当前无明确动作",
+        recommendedChannel = recommendedAction and recommendedAction.channel or "none",
+        rankedRecommendations = rankedRecommendations,
+        queueIndicator = queueIndicator,
         reserveRage = reserveRage,
         context = context,
         nextEvaluations = nextEvaluations,

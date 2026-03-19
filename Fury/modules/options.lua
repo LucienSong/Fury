@@ -10,6 +10,7 @@ local pages = {}
 local activePage = "icon"
 local keybindEdits = {}
 local keybindDescText
+local keybindScrollChild
 local changelogBodyText
 local aboutBodyText
 local aboutScrollChild
@@ -21,6 +22,8 @@ local iconTextCheck
 local iconLockCheck
 local hamstringExecuteCheck
 local iconSizeLabel
+local timelineWidthLabel
+local timelineSecondsLabel
 local horizonLabel
 local sunderHpLabel
 local sunderRefreshLabel
@@ -72,12 +75,17 @@ local KEYBIND_ROWS = {
     { token = "BLOODTHIRST", label = "嗜血 (BT)" },
     { token = "WHIRLWIND", label = "旋风斩 (WW)" },
     { token = "EXECUTE", label = "斩杀 (EXE)" },
+    { token = "HAMSTRING", label = "断筋 (HAM)" },
     { token = "SUNDER_ARMOR", label = "破甲 (SND)" },
     { token = "HEROIC_STRIKE", label = "英勇打击 (HS)" },
     { token = "CLEAVE", label = "顺劈斩 (CL)" },
+    { token = "BATTLE_SHOUT", label = "战斗怒吼 (BS)" },
+    { token = "BLOODRAGE", label = "血性狂暴 (BR)" },
     { token = "REVENGE", label = "复仇 (REV)" },
     { token = "SHIELD_SLAM", label = "盾猛 (SS)" },
     { token = "SHIELD_BLOCK", label = "盾挡 (SB)" },
+    { token = "TAUNT", label = "嘲讽 (TAUNT)" },
+    { token = "MOCKING_BLOW", label = "惩戒痛击 (MB)" },
     { token = "LAST_STAND", label = "破釜沉舟 (LS)" },
 }
 
@@ -123,9 +131,6 @@ local function RefreshOptionsState()
     if minimapCheck then
         minimapCheck:SetChecked(ns.IsMinimapIconShown())
     end
-    if decisionIconCheck and ns.IsDecisionIconShowOutOfCombat then
-        decisionIconCheck:SetChecked(ns.IsDecisionIconShowOutOfCombat())
-    end
     if iconTextCheck and ns.IsDecisionIconTextShown then
         iconTextCheck:SetChecked(ns.IsDecisionIconTextShown())
     end
@@ -135,8 +140,14 @@ local function RefreshOptionsState()
     if hamstringExecuteCheck and ns.IsHamstringExecutePhaseEnabled then
         hamstringExecuteCheck:SetChecked(ns.IsHamstringExecutePhaseEnabled())
     end
-    if iconSizeLabel and ns.GetDecisionIconSizePresetLabel then
-        iconSizeLabel:SetText("图标尺寸: " .. ns.GetDecisionIconSizePresetLabel())
+    if iconSizeLabel and ns.GetDecisionIconBaseSize then
+        iconSizeLabel:SetText("推荐图标大小: " .. tostring(ns.GetDecisionIconBaseSize()) .. "px")
+    end
+    if timelineWidthLabel and ns.GetDecisionTimelineWidth then
+        timelineWidthLabel:SetText("时间线宽度: " .. tostring(ns.GetDecisionTimelineWidth()) .. "px")
+    end
+    if timelineSecondsLabel and ns.GetDecisionTimelineSeconds then
+        timelineSecondsLabel:SetText("时间线长度: " .. tostring(ns.GetDecisionTimelineSeconds()) .. "s")
     end
     if horizonLabel and ns.GetDecisionHorizonMs then
         horizonLabel:SetText("预测窗口: " .. tostring(ns.GetDecisionHorizonMs()) .. "ms")
@@ -160,6 +171,9 @@ local function RefreshOptionsState()
         RefreshKeybindState()
         if keybindDescText and panel then
             keybindDescText:SetWidth(math.max((panel:GetWidth() or 760) - 260, 260))
+        end
+        if keybindScrollChild and panel then
+            keybindScrollChild:SetWidth(math.max((panel:GetWidth() or 760) - 280, 300))
         end
     end
     if activePage == "about" and aboutBodyText and aboutScrollChild and panel then
@@ -231,14 +245,16 @@ local function BuildAboutPage(parent)
         "Classic Hardcore Realm & ID: @硬汉-健将",
         "GitHub: https://github.com/LucienSong/Fury",
         "",
-        "Fury 是 WoW Classic Era 狂暴战决策辅助插件，核心目标是提升实战循环稳定性，",
-        "在 DPS/TPS 场景下给出更可解释的下一技能建议。",
+        "Fury 2.0 是 WoW Classic Era 狂暴战决策辅助插件，核心目标是提升实战循环稳定性，",
+        "在 DPS/TPS 场景下给出更硬、更可解释的下一技能建议。",
         "",
         "功能简介：",
-        "- 实时主技能建议 + 泄怒建议（HS/Cleave）",
+        "- 单主图标提示当前第一优先动作",
+        "- DPS/TPS 两套独立优先级树，不再混排",
+        "- 时间线展示全部成功施放技能与泄怒入队状态",
         "- 断筋骗乱舞与主循环保护窗联动",
         "- 未学习/低等级/rank 未满自动降级决策",
-        "- Debug 面板展示候选评分与淘汰原因",
+        "- Debug 面板展示优先级树、候选评分与淘汰原因",
         "- 键位提示、图标尺寸与显示行为可配置",
         "- 参数覆盖账号角色共享，支持一键恢复基线",
     }, "\n"))
@@ -258,17 +274,8 @@ local function BuildIconPage(parent)
         ns.SetMinimapIconShown(self:GetChecked())
     end)
 
-    decisionIconCheck = CreateFrame("CheckButton", "FuryOptionsDecisionIconCheck", page, "InterfaceOptionsCheckButtonTemplate")
-    decisionIconCheck:SetPoint("TOPLEFT", minimapCheck, "BOTTOMLEFT", 0, -8)
-    _G[decisionIconCheck:GetName() .. "Text"]:SetText("非战斗显示主提示图标")
-    decisionIconCheck:SetScript("OnClick", function(self)
-        if ns.SetDecisionIconShowOutOfCombat then
-            ns.SetDecisionIconShowOutOfCombat(self:GetChecked())
-        end
-    end)
-
     iconTextCheck = CreateFrame("CheckButton", "FuryOptionsIconTextCheck", page, "InterfaceOptionsCheckButtonTemplate")
-    iconTextCheck:SetPoint("TOPLEFT", decisionIconCheck, "BOTTOMLEFT", 0, -8)
+    iconTextCheck:SetPoint("TOPLEFT", minimapCheck, "BOTTOMLEFT", 0, -8)
     _G[iconTextCheck:GetName() .. "Text"]:SetText("显示图标下方技能文字")
     iconTextCheck:SetScript("OnClick", function(self)
         if ns.SetDecisionIconTextShown then
@@ -289,18 +296,78 @@ local function BuildIconPage(parent)
     iconSizeLabel:SetPoint("TOPLEFT", iconLockCheck, "BOTTOMLEFT", 0, -12)
     iconSizeLabel:SetText("")
 
-    local iconSizeButton = CreateFrame("Button", "FuryOptionsIconSizeButton", page, "UIPanelButtonTemplate")
-    iconSizeButton:SetSize(96, 22)
-    iconSizeButton:SetPoint("LEFT", iconSizeLabel, "RIGHT", 10, 0)
-    iconSizeButton:SetText("切换尺寸")
-    iconSizeButton:SetScript("OnClick", function()
-        if not (ns.GetDecisionIconSizePreset and ns.SetDecisionIconSizePreset) then
-            return
+    local iconSizeMinusButton = CreateFrame("Button", "FuryOptionsIconSizeMinus", page, "UIPanelButtonTemplate")
+    iconSizeMinusButton:SetSize(50, 22)
+    iconSizeMinusButton:SetPoint("TOPLEFT", iconSizeLabel, "BOTTOMLEFT", 0, -8)
+    iconSizeMinusButton:SetText("-4px")
+    iconSizeMinusButton:SetScript("OnClick", function()
+        if ns.GetDecisionIconBaseSize and ns.SetDecisionIconBaseSize then
+            ns.SetDecisionIconBaseSize(ns.GetDecisionIconBaseSize() - 4)
+            RefreshOptionsState()
         end
-        local cur = ns.GetDecisionIconSizePreset()
-        local nextPreset = (cur == "compact" and "standard") or (cur == "standard" and "large") or "compact"
-        ns.SetDecisionIconSizePreset(nextPreset)
-        RefreshOptionsState()
+    end)
+
+    local iconSizePlusButton = CreateFrame("Button", "FuryOptionsIconSizePlus", page, "UIPanelButtonTemplate")
+    iconSizePlusButton:SetSize(50, 22)
+    iconSizePlusButton:SetPoint("LEFT", iconSizeMinusButton, "RIGHT", 8, 0)
+    iconSizePlusButton:SetText("+4px")
+    iconSizePlusButton:SetScript("OnClick", function()
+        if ns.GetDecisionIconBaseSize and ns.SetDecisionIconBaseSize then
+            ns.SetDecisionIconBaseSize(ns.GetDecisionIconBaseSize() + 4)
+            RefreshOptionsState()
+        end
+    end)
+
+    timelineWidthLabel = page:CreateFontString(nil, "ARTWORK", "GameFontNormal")
+    timelineWidthLabel:SetPoint("TOPLEFT", iconSizeMinusButton, "BOTTOMLEFT", 0, -14)
+    timelineWidthLabel:SetText("")
+
+    local timelineWidthMinusButton = CreateFrame("Button", "FuryOptionsTimelineWidthMinus", page, "UIPanelButtonTemplate")
+    timelineWidthMinusButton:SetSize(60, 22)
+    timelineWidthMinusButton:SetPoint("TOPLEFT", timelineWidthLabel, "BOTTOMLEFT", 0, -8)
+    timelineWidthMinusButton:SetText("-20px")
+    timelineWidthMinusButton:SetScript("OnClick", function()
+        if ns.GetDecisionTimelineWidth and ns.SetDecisionTimelineWidth then
+            ns.SetDecisionTimelineWidth(ns.GetDecisionTimelineWidth() - 20)
+            RefreshOptionsState()
+        end
+    end)
+
+    local timelineWidthPlusButton = CreateFrame("Button", "FuryOptionsTimelineWidthPlus", page, "UIPanelButtonTemplate")
+    timelineWidthPlusButton:SetSize(60, 22)
+    timelineWidthPlusButton:SetPoint("LEFT", timelineWidthMinusButton, "RIGHT", 8, 0)
+    timelineWidthPlusButton:SetText("+20px")
+    timelineWidthPlusButton:SetScript("OnClick", function()
+        if ns.GetDecisionTimelineWidth and ns.SetDecisionTimelineWidth then
+            ns.SetDecisionTimelineWidth(ns.GetDecisionTimelineWidth() + 20)
+            RefreshOptionsState()
+        end
+    end)
+
+    timelineSecondsLabel = page:CreateFontString(nil, "ARTWORK", "GameFontNormal")
+    timelineSecondsLabel:SetPoint("TOPLEFT", timelineWidthMinusButton, "BOTTOMLEFT", 0, -14)
+    timelineSecondsLabel:SetText("")
+
+    local timelineSecondsMinusButton = CreateFrame("Button", "FuryOptionsTimelineSecondsMinus", page, "UIPanelButtonTemplate")
+    timelineSecondsMinusButton:SetSize(50, 22)
+    timelineSecondsMinusButton:SetPoint("TOPLEFT", timelineSecondsLabel, "BOTTOMLEFT", 0, -8)
+    timelineSecondsMinusButton:SetText("-1s")
+    timelineSecondsMinusButton:SetScript("OnClick", function()
+        if ns.GetDecisionTimelineSeconds and ns.SetDecisionTimelineSeconds then
+            ns.SetDecisionTimelineSeconds(ns.GetDecisionTimelineSeconds() - 1)
+            RefreshOptionsState()
+        end
+    end)
+
+    local timelineSecondsPlusButton = CreateFrame("Button", "FuryOptionsTimelineSecondsPlus", page, "UIPanelButtonTemplate")
+    timelineSecondsPlusButton:SetSize(50, 22)
+    timelineSecondsPlusButton:SetPoint("LEFT", timelineSecondsMinusButton, "RIGHT", 8, 0)
+    timelineSecondsPlusButton:SetText("+1s")
+    timelineSecondsPlusButton:SetScript("OnClick", function()
+        if ns.GetDecisionTimelineSeconds and ns.SetDecisionTimelineSeconds then
+            ns.SetDecisionTimelineSeconds(ns.GetDecisionTimelineSeconds() + 1)
+            RefreshOptionsState()
+        end
     end)
 end
 
@@ -518,25 +585,35 @@ local function BuildKeybindPage(parent)
     if keybindDescText.SetNonSpaceWrap then
         keybindDescText:SetNonSpaceWrap(true)
     end
-    keybindDescText:SetText("填写技能键位后，主图标上方/中央会显示对应按键。保存到 FuryDB，账号角色共享。")
+    keybindDescText:SetText("填写技能键位后，推荐图标会显示对应按键。主循环、泄怒、仇恨和 off-GCD 技能共用这份配置，保存在 FuryDB，账号角色共享。")
+
+    local scroll = CreateFrame("ScrollFrame", "FuryOptionsKeybindScroll", page, "UIPanelScrollFrameTemplate")
+    scroll:SetPoint("TOPLEFT", keybindDescText, "BOTTOMLEFT", 0, -10)
+    scroll:SetPoint("BOTTOMRIGHT", -30, 12)
+
+    local child = CreateFrame("Frame", nil, scroll)
+    child:SetWidth(520)
+    child:SetHeight(1)
+    scroll:SetScrollChild(child)
+    keybindScrollChild = child
 
     local prevLabel
     for i, row in ipairs(KEYBIND_ROWS) do
-        local label = page:CreateFontString(nil, "ARTWORK", "GameFontNormal")
+        local label = child:CreateFontString(nil, "ARTWORK", "GameFontNormal")
         if i == 1 then
-            label:SetPoint("TOPLEFT", keybindDescText, "BOTTOMLEFT", 0, -12)
+            label:SetPoint("TOPLEFT", 0, -2)
         else
             label:SetPoint("TOPLEFT", prevLabel, "BOTTOMLEFT", 0, -12)
         end
-        label:SetWidth(190)
+        label:SetWidth(220)
         label:SetJustifyH("LEFT")
         label:SetText(row.label)
 
-        local edit = CreateFrame("EditBox", "FuryOptionsKeybindEdit" .. i, page, "InputBoxTemplate")
-        edit:SetSize(120, 24)
+        local edit = CreateFrame("EditBox", "FuryOptionsKeybindEdit" .. i, child, "InputBoxTemplate")
+        edit:SetSize(140, 24)
         edit:SetPoint("LEFT", label, "RIGHT", 10, 0)
         edit:SetAutoFocus(false)
-        edit:SetMaxLetters(10)
+        edit:SetMaxLetters(16)
         edit:SetScript("OnEnterPressed", function(self)
             if ns.SetSkillKeybindHint then
                 ns.SetSkillKeybindHint(row.token, self:GetText() or "")
@@ -552,7 +629,7 @@ local function BuildKeybindPage(parent)
         end)
         keybindEdits[row.token] = edit
 
-        local clearBtn = CreateFrame("Button", "FuryOptionsKeybindClear" .. i, page, "UIPanelButtonTemplate")
+        local clearBtn = CreateFrame("Button", "FuryOptionsKeybindClear" .. i, child, "UIPanelButtonTemplate")
         clearBtn:SetSize(60, 22)
         clearBtn:SetPoint("LEFT", edit, "RIGHT", 8, 0)
         clearBtn:SetText("清空")
@@ -565,6 +642,7 @@ local function BuildKeybindPage(parent)
 
         prevLabel = label
     end
+    child:SetHeight(math.max(24, (#KEYBIND_ROWS * 36) + 12))
 end
 
 local function BuildChangelogPage(parent)
@@ -666,8 +744,9 @@ local function BuildPanelContent()
     local navY = -14
     for _, item in ipairs(NAV_ITEMS) do
         local btn = CreateFrame("Button", "FuryOptionsNav" .. item.id, left, "UIPanelButtonTemplate")
-        btn:SetSize(132, 24)
-        btn:SetPoint("TOPLEFT", 12, navY)
+        btn:SetHeight(24)
+        btn:SetPoint("TOPLEFT", 10, navY)
+        btn:SetPoint("TOPRIGHT", -10, navY)
         btn:SetText(item.label)
         btn:SetScript("OnClick", function()
             SetActivePage(item.id)
@@ -690,6 +769,7 @@ local function RegisterPanel()
     panel = CreateFrame("Frame", "FuryOptionsPanel")
     panel.name = "Fury"
     panel:SetScript("OnShow", RefreshOptionsState)
+    panel:SetScript("OnSizeChanged", RefreshOptionsState)
 
     BuildPanelContent()
 

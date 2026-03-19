@@ -4,27 +4,22 @@ local IconModule = {
     name = "MetricsIcon",
 }
 
-local frame
-local iconTexture
-local iconGlow
-local iconGlowAnim
-local iconMarquee
-local marqueeSegments = {}
-local iconGlowHost
-local iconShine
-local cooldownText
-local skillText
-local skillKeyText
-local dumpIcon
-local dumpGlow
-local dumpGlowAnim
-local dumpMarquee
-local dumpMarqueeSegments = {}
-local dumpGlowHost
-local dumpShine
-local dumpText
-local dumpKeyText
+local iconFrame
+local timelinePanel
+local rankedSlots = {}
+local timelineMarkers = {}
 local currentPreset
+
+local renderState = {
+    tokenX = {},
+    lastQueuedToken = nil,
+}
+
+local timelineEvents = {}
+
+local TIMELINE_MARKER_LIMIT = 10
+local SLOT_MOVE_DURATION = 0.18
+local RENDER_TICK = 0.08
 
 local SHORT_LABEL = {
     BLOODRAGE = "BR",
@@ -37,12 +32,51 @@ local SHORT_LABEL = {
     SHIELD_BLOCK = "SB",
     SHIELD_SLAM = "SS",
     LAST_STAND = "LS",
+    HEROIC_STRIKE = "HS",
+    CLEAVE = "CLV",
+    TAUNT = "TNT",
+    MOCKING_BLOW = "MB",
+    HAMSTRING = "HAM",
+    WAIT = "WAIT",
 }
 
 local SIZE_PRESETS = {
-    compact = { icon = 40, gap = 4, padX = 4, frameHeight = 78, frameHeightText = 90, textGap = 1, dumpWidth = 72 },
-    standard = { icon = 50, gap = 5, padX = 5, frameHeight = 90, frameHeightText = 104, textGap = 1, dumpWidth = 86 },
-    large = { icon = 60, gap = 6, padX = 6, frameHeight = 102, frameHeightText = 118, textGap = 1, dumpWidth = 102 },
+    compact = {
+        baseIcon = 42,
+        scales = { 1.00, 0.86, 0.74 },
+        gap = 6,
+        padX = 4,
+        topPad = 8,
+        bottomPad = 6,
+        labelHeight = 15,
+        textGap = 1,
+        frameMinWidth = 160,
+        timelineHeight = 20,
+    },
+    standard = {
+        baseIcon = 52,
+        scales = { 1.00, 0.86, 0.74 },
+        gap = 6,
+        padX = 6,
+        topPad = 8,
+        bottomPad = 6,
+        labelHeight = 16,
+        textGap = 1,
+        frameMinWidth = 188,
+        timelineHeight = 22,
+    },
+    large = {
+        baseIcon = 62,
+        scales = { 1.00, 0.86, 0.74 },
+        gap = 7,
+        padX = 6,
+        topPad = 8,
+        bottomPad = 8,
+        labelHeight = 18,
+        textGap = 2,
+        frameMinWidth = 212,
+        timelineHeight = 24,
+    },
 }
 
 local PRESET_LABEL = {
@@ -50,44 +84,6 @@ local PRESET_LABEL = {
     standard = "标准",
     large = "大号",
 }
-
-local MARQUEE_OUTER_OFFSET = 5
-local HS_NAME = GetSpellInfo(78) or "Heroic Strike"
-local CLEAVE_NAME = GetSpellInfo(845) or "Cleave"
-local HS_RANK_IDS = { 78, 284, 285, 1608, 11564, 11565, 11566, 11567, 25286 }
-local CLEAVE_RANK_IDS = { 845, 7369, 11608, 11609, 20569 }
-
-local function BuildDashedMarquee(container, segmentTable)
-    local stroke = 3
-    local function addSegment(point, x, y, w, h)
-        local tex = container:CreateTexture(nil, "OVERLAY")
-        tex:SetColorTexture(1, 0.95, 0.2, 1)
-        tex:SetPoint(point, x, y)
-        tex:SetSize(w, h)
-        tex:SetAlpha(0.25)
-        table.insert(segmentTable, tex)
-    end
-
-    local gap = 8
-    local dash = 6
-    for offset = 0, 40, gap do
-        addSegment("TOPLEFT", offset, 0, dash, stroke)
-        addSegment("BOTTOMLEFT", offset, 0, dash, stroke)
-        addSegment("TOPLEFT", 0, -offset, stroke, dash)
-        addSegment("TOPRIGHT", 0, -offset, stroke, dash)
-    end
-end
-
-local function UpdateDashedMarquee(segmentTable, phase)
-    local total = #segmentTable
-    if total == 0 then
-        return
-    end
-    local bright = ((phase - 1) % total) + 1
-    for i = 1, total do
-        segmentTable[i]:SetAlpha(i == bright and 1 or 0.25)
-    end
-end
 
 local function SetNativeOverlayGlow(host, shouldShow)
     if not host then
@@ -124,80 +120,27 @@ local function SetPulse(tex, anim, shouldShow)
     end
 end
 
-local function SetShine(shineFrame, host, shouldShow)
-    -- Classic Era 下 AutoCastShine 在自定义宿主上存在不稳定崩溃，先禁用星芒通路。
-    if shineFrame then
-        shineFrame._furyShineOn = false
+local function Clamp(value, lo, hi)
+    if value < lo then
+        return lo
     end
-    return
+    if value > hi then
+        return hi
+    end
+    return value
 end
 
-local function InRangeOrNil(spellName)
-    local ok = IsSpellInRange(spellName, "target")
-    if ok == nil then
-        return true
-    end
-    return ok == 1
+local function GetMetricsDb()
+    return ns.db and ns.db.metrics or nil
 end
 
-local function IsDumpSkillUsable(token)
-    if token == "HEROIC_STRIKE" then
-        local usable, noMana = IsUsableSpell(HS_NAME)
-        return usable and not noMana and InRangeOrNil(HS_NAME)
-    elseif token == "CLEAVE" then
-        local usable, noMana = IsUsableSpell(CLEAVE_NAME)
-        return usable and not noMana and InRangeOrNil(CLEAVE_NAME)
-    end
-    return false
-end
-
-local function IsDumpQueued(token)
-    if not IsCurrentSpell then
-        return false
-    end
-    if token == "HEROIC_STRIKE" then
-        if IsCurrentSpell(HS_NAME) then
-            return true
-        end
-        for i = 1, #HS_RANK_IDS do
-            if IsCurrentSpell(HS_RANK_IDS[i]) then
-                return true
-            end
-        end
-        return false
-    elseif token == "CLEAVE" then
-        if IsCurrentSpell(CLEAVE_NAME) then
-            return true
-        end
-        for i = 1, #CLEAVE_RANK_IDS do
-            if IsCurrentSpell(CLEAVE_RANK_IDS[i]) then
-                return true
-            end
-        end
-        return false
-    end
-    return false
-end
-
-local function GetQueuedDumpToken()
-    if not IsCurrentSpell then
-        return nil
-    end
-    if IsDumpQueued("CLEAVE") then
-        return "CLEAVE"
-    end
-    if IsDumpQueued("HEROIC_STRIKE") then
-        return "HEROIC_STRIKE"
-    end
-    return nil
-end
-
-local function SavePosition()
-    if not frame or not ns.db or not ns.db.metrics then
+local function SaveFramePosition(targetFrame, key)
+    local metricsDb = GetMetricsDb()
+    if not targetFrame or not metricsDb then
         return
     end
-    local point, _, relativePoint, x, y = frame:GetPoint(1)
-    ns.db.metrics.iconPoint = {
+    local point, _, relativePoint, x, y = targetFrame:GetPoint(1)
+    metricsDb[key] = {
         point = point or "CENTER",
         relativePoint = relativePoint or "CENTER",
         x = x or 0,
@@ -205,28 +148,33 @@ local function SavePosition()
     }
 end
 
-local function RestorePosition()
-    if not frame then
+local function RestoreFramePosition(targetFrame, key, defaultX, defaultY)
+    if not targetFrame then
         return
     end
-    local p = ns.db and ns.db.metrics and ns.db.metrics.iconPoint
-    frame:ClearAllPoints()
-    frame:SetPoint(
+    local metricsDb = GetMetricsDb()
+    local p = metricsDb and metricsDb[key]
+    targetFrame:ClearAllPoints()
+    targetFrame:SetPoint(
         (p and p.point) or "CENTER",
         UIParent,
         (p and p.relativePoint) or "CENTER",
-        (p and p.x) or 260,
-        (p and p.y) or 0
+        (p and p.x) or defaultX,
+        (p and p.y) or defaultY
     )
 end
 
 function ns.SetDecisionIconShown(show)
-    if not ns.db or not ns.db.metrics then
+    local metricsDb = GetMetricsDb()
+    if not metricsDb then
         return
     end
-    ns.db.metrics.showIcon = show and true or false
-    if frame then
-        frame:SetShown(ns.db.metrics.showIcon)
+    metricsDb.showIcon = show and true or false
+    if iconFrame then
+        iconFrame:SetShown(metricsDb.showIcon)
+    end
+    if timelinePanel then
+        timelinePanel:SetShown(metricsDb.showIcon)
     end
     if ns.RefreshDecisionIcon then
         ns.RefreshDecisionIcon()
@@ -234,60 +182,63 @@ function ns.SetDecisionIconShown(show)
 end
 
 function ns.ToggleDecisionIcon()
-    if not ns.db or not ns.db.metrics then
+    local metricsDb = GetMetricsDb()
+    if not metricsDb then
         return
     end
-    ns.SetDecisionIconShown(not ns.db.metrics.showIcon)
+    ns.SetDecisionIconShown(not metricsDb.showIcon)
 end
 
 function ns.IsDecisionIconShown()
-    return ns.db and ns.db.metrics and ns.db.metrics.showIcon
+    local metricsDb = GetMetricsDb()
+    return metricsDb and metricsDb.showIcon
 end
 
 function ns.SetDecisionIconShowOutOfCombat(show)
-    if not ns.db or not ns.db.metrics then
-        return
-    end
-    ns.db.metrics.iconShowOutOfCombat = show and true or false
     if ns.RefreshDecisionIcon then
         ns.RefreshDecisionIcon()
     end
 end
 
 function ns.IsDecisionIconShowOutOfCombat()
-    return ns.db and ns.db.metrics and ns.db.metrics.iconShowOutOfCombat
+    return true
 end
 
 function ns.SetDecisionIconTextShown(show)
-    if not ns.db or not ns.db.metrics then
+    local metricsDb = GetMetricsDb()
+    if not metricsDb then
         return
     end
-    ns.db.metrics.iconShowText = show and true or false
+    metricsDb.iconShowText = show and true or false
     if ns.RefreshDecisionIcon then
         ns.RefreshDecisionIcon()
     end
 end
 
 function ns.IsDecisionIconTextShown()
-    return ns.db and ns.db.metrics and ns.db.metrics.iconShowText
+    local metricsDb = GetMetricsDb()
+    return metricsDb and metricsDb.iconShowText
 end
 
 function ns.SetDecisionIconLocked(locked)
-    if not ns.db or not ns.db.metrics then
+    local metricsDb = GetMetricsDb()
+    if not metricsDb then
         return
     end
-    ns.db.metrics.iconLocked = locked and true or false
+    metricsDb.iconLocked = locked and true or false
     if ns.RefreshDecisionIcon then
         ns.RefreshDecisionIcon()
     end
 end
 
 function ns.IsDecisionIconLocked()
-    return ns.db and ns.db.metrics and ns.db.metrics.iconLocked
+    local metricsDb = GetMetricsDb()
+    return metricsDb and metricsDb.iconLocked
 end
 
 function ns.GetDecisionIconSizePreset()
-    local preset = ns.db and ns.db.metrics and ns.db.metrics.iconSizePreset
+    local metricsDb = GetMetricsDb()
+    local preset = metricsDb and metricsDb.iconSizePreset
     if preset == "compact" or preset == "standard" or preset == "large" then
         return preset
     end
@@ -295,12 +246,12 @@ function ns.GetDecisionIconSizePreset()
 end
 
 function ns.GetDecisionIconSizePresetLabel()
-    local preset = ns.GetDecisionIconSizePreset()
-    return PRESET_LABEL[preset] or "标准"
+    return PRESET_LABEL[ns.GetDecisionIconSizePreset()] or "标准"
 end
 
 function ns.SetDecisionIconSizePreset(preset)
-    if not ns.db or not ns.db.metrics then
+    local metricsDb = GetMetricsDb()
+    if not metricsDb then
         return
     end
     local p = tostring(preset or ""):lower()
@@ -314,104 +265,70 @@ function ns.SetDecisionIconSizePreset(preset)
     if p ~= "compact" and p ~= "standard" and p ~= "large" then
         return
     end
-    ns.db.metrics.iconSizePreset = p
+    metricsDb.iconSizePreset = p
+    currentPreset = nil
     if ns.RefreshDecisionIcon then
         ns.RefreshDecisionIcon()
     end
 end
 
-local function ApplyLayout(showText)
-    if not frame then
+function ns.GetDecisionIconBaseSize()
+    local metricsDb = GetMetricsDb()
+    local raw = tonumber(metricsDb and metricsDb.iconBaseSize)
+    if raw and raw > 0 then
+        return Clamp(math.floor(raw + 0.5), 32, 84)
+    end
+    local preset = ns.GetDecisionIconSizePreset()
+    local cfg = SIZE_PRESETS[preset] or SIZE_PRESETS.standard
+    return cfg.baseIcon or 52
+end
+
+function ns.SetDecisionIconBaseSize(size)
+    local metricsDb = GetMetricsDb()
+    if not metricsDb then
         return
     end
-    local presetName = ns.GetDecisionIconSizePreset()
-    local layoutKey = presetName .. ":" .. (showText and "text" or "notext")
-    if currentPreset == layoutKey then
+    metricsDb.iconBaseSize = Clamp(math.floor(tonumber(size) or 52), 32, 84)
+    currentPreset = nil
+    if ns.RefreshDecisionIcon then
+        ns.RefreshDecisionIcon()
+    end
+end
+
+function ns.GetDecisionTimelineWidth()
+    local metricsDb = GetMetricsDb()
+    return Clamp(math.floor(tonumber(metricsDb and metricsDb.timelineWidth) or 220), 140, 420)
+end
+
+function ns.SetDecisionTimelineWidth(width)
+    local metricsDb = GetMetricsDb()
+    if not metricsDb then
         return
     end
-    currentPreset = layoutKey
-    local cfg = SIZE_PRESETS[presetName] or SIZE_PRESETS.standard
-    local icon = cfg.icon
-    local gap = cfg.gap
-    local padX = cfg.padX
-    local width = padX * 2 + icon * 2 + gap
-    local height = showText and cfg.frameHeightText or cfg.frameHeight
+    metricsDb.timelineWidth = Clamp(math.floor(tonumber(width) or 220), 140, 420)
+    if ns.RefreshDecisionIcon then
+        ns.RefreshDecisionIcon()
+    end
+end
 
-    frame:SetSize(width, height)
-    iconTexture:SetSize(icon, icon)
-    iconGlow:SetSize(icon + 40, icon + 40)
-    dumpIcon:SetSize(icon, icon)
-    dumpGlow:SetSize(icon + 40, icon + 40)
+function ns.GetDecisionTimelineSeconds()
+    local metricsDb = GetMetricsDb()
+    return Clamp(math.floor(tonumber(metricsDb and metricsDb.timelineSeconds) or 5), 3, 12)
+end
 
-    iconTexture:ClearAllPoints()
-    iconTexture:SetPoint("LEFT", padX, 0)
-    dumpIcon:ClearAllPoints()
-    dumpIcon:SetPoint("LEFT", iconTexture, "RIGHT", gap, 0)
-    dumpGlow:ClearAllPoints()
-    dumpGlow:SetPoint("CENTER", dumpIcon, "CENTER", 0, 0)
-    if dumpMarquee then
-        dumpMarquee:ClearAllPoints()
-        dumpMarquee:SetPoint("TOPLEFT", dumpIcon, "TOPLEFT", -MARQUEE_OUTER_OFFSET, MARQUEE_OUTER_OFFSET)
-        dumpMarquee:SetPoint("BOTTOMRIGHT", dumpIcon, "BOTTOMRIGHT", MARQUEE_OUTER_OFFSET, -MARQUEE_OUTER_OFFSET)
+function ns.SetDecisionTimelineSeconds(seconds)
+    local metricsDb = GetMetricsDb()
+    if not metricsDb then
+        return
     end
-    if iconMarquee then
-        iconMarquee:ClearAllPoints()
-        iconMarquee:SetPoint("TOPLEFT", iconTexture, "TOPLEFT", -MARQUEE_OUTER_OFFSET, MARQUEE_OUTER_OFFSET)
-        iconMarquee:SetPoint("BOTTOMRIGHT", iconTexture, "BOTTOMRIGHT", MARQUEE_OUTER_OFFSET, -MARQUEE_OUTER_OFFSET)
-    end
-
-    if cooldownText and cooldownText.SetFont then
-        cooldownText:ClearAllPoints()
-        cooldownText:SetPoint("BOTTOM", iconTexture, "TOP", 0, 2)
-        cooldownText:SetWidth(icon + 10)
-        cooldownText:SetFont(STANDARD_TEXT_FONT, math.max(math.floor(icon * 0.48), 12), "OUTLINE")
-    end
-    if iconGlowHost then
-        iconGlowHost:SetSize(icon, icon)
-        iconGlowHost:ClearAllPoints()
-        iconGlowHost:SetPoint("CENTER", iconTexture, "CENTER", 0, 0)
-    end
-    if dumpGlowHost then
-        dumpGlowHost:SetSize(icon, icon)
-        dumpGlowHost:ClearAllPoints()
-        dumpGlowHost:SetPoint("CENTER", dumpIcon, "CENTER", 0, 0)
-    end
-    if iconShine then
-        iconShine:SetAllPoints(iconGlowHost)
-    end
-    if dumpShine then
-        dumpShine:SetAllPoints(dumpGlowHost)
-    end
-
-    if showText then
-        skillText:ClearAllPoints()
-        skillText:SetPoint("TOP", iconTexture, "BOTTOM", 0, -cfg.textGap)
-        skillText:SetWidth(icon + 6)
-
-        dumpText:ClearAllPoints()
-        dumpText:SetPoint("TOP", dumpIcon, "BOTTOM", 0, -cfg.textGap)
-        dumpText:SetWidth(cfg.dumpWidth)
-    end
-    if skillKeyText then
-        skillKeyText:ClearAllPoints()
-        skillKeyText:SetPoint("CENTER", iconTexture, "CENTER", 0, 0)
-        skillKeyText:SetWidth(icon)
-        if skillKeyText.SetFont then
-            skillKeyText:SetFont(STANDARD_TEXT_FONT, math.max(math.floor(icon * 0.6), 10), "OUTLINE")
-        end
-    end
-    if dumpKeyText then
-        dumpKeyText:ClearAllPoints()
-        dumpKeyText:SetPoint("CENTER", dumpIcon, "CENTER", 0, 0)
-        dumpKeyText:SetWidth(icon)
-        if dumpKeyText.SetFont then
-            dumpKeyText:SetFont(STANDARD_TEXT_FONT, math.max(math.floor(icon * 0.6), 10), "OUTLINE")
-        end
+    metricsDb.timelineSeconds = Clamp(math.floor(tonumber(seconds) or 5), 3, 12)
+    if ns.RefreshDecisionIcon then
+        ns.RefreshDecisionIcon()
     end
 end
 
 local function GetKeybindText(token)
-    if not token or token == "" or token == "WAIT" or token == "NONE" then
+    if not token or token == "" or token == "NONE" then
         return nil
     end
     if ns.GetSkillKeybindHint then
@@ -423,225 +340,662 @@ local function GetKeybindText(token)
     return nil
 end
 
-local function Render()
-    if not frame then
-        return
+local function GetSlotLabel(index, rec)
+    if not rec or not rec.token then
+        return ""
     end
-    if not ns.IsDecisionIconShown() then
-        frame:Hide()
-        return
-    end
+    return tostring(index) .. ":" .. (SHORT_LABEL[rec.token] or rec.token or "")
+end
 
-    local inCombat = UnitAffectingCombat("player")
-    if (not inCombat) and (not ns.IsDecisionIconShowOutOfCombat()) then
-        frame:Hide()
-        return
-    end
+local function CreateSlot(parent)
+    local slot = {}
+    slot.frame = CreateFrame("Frame", nil, parent)
+    slot.frame:Hide()
 
-    if not frame:IsShown() then
-        frame:Show()
-    end
-    frame:SetAlpha(1)
-    frame:EnableMouse(true)
-    local showText = ns.IsDecisionIconTextShown()
-    ApplyLayout(showText)
+    slot.texture = slot.frame:CreateTexture(nil, "ARTWORK")
+    slot.texture:SetTexCoord(0.08, 0.92, 0.08, 0.92)
 
-    local rec = ns.decision and ns.decision.GetRecommendation and ns.decision.GetRecommendation() or nil
+    slot.glowHost = CreateFrame("Button", nil, slot.frame)
+    slot.glowHost:SetAlpha(1)
+    slot.glowHost:EnableMouse(false)
+
+    slot.glow = slot.frame:CreateTexture(nil, "OVERLAY")
+    slot.glow:SetTexture("Interface\\Buttons\\UI-ActionButton-Border")
+    slot.glow:SetBlendMode("ADD")
+    slot.glow:SetVertexColor(1, 0.95, 0.2, 0.85)
+    slot.glow:Hide()
+
+    slot.glowAnim = slot.glow:CreateAnimationGroup()
+    slot.glowAnim:SetLooping("BOUNCE")
+    local alpha = slot.glowAnim:CreateAnimation("Alpha")
+    alpha:SetFromAlpha(0.2)
+    alpha:SetToAlpha(0.85)
+    alpha:SetDuration(0.35)
+    alpha:SetSmoothing("IN_OUT")
+
+    slot.cooldownText = slot.frame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    slot.cooldownText:SetTextColor(1, 0.95, 0.3)
+    slot.cooldownText:Hide()
+
+    slot.label = slot.frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    slot.label:SetJustifyH("CENTER")
+    slot.label:Hide()
+
+    slot.keyText = slot.frame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    slot.keyText:SetTextColor(1, 1, 1)
+    slot.keyText:SetJustifyH("CENTER")
+    slot.keyText:Hide()
+
+    slot.currentX = 0
+    slot.targetX = 0
+    slot.y = -8
+    slot.lastToken = nil
+    return slot
+end
+
+local function CreateTimelineMarker(parent)
+    local marker = CreateFrame("Frame", nil, parent)
+    marker:SetSize(16, 16)
+    marker:Hide()
+
+    marker.texture = marker:CreateTexture(nil, "ARTWORK")
+    marker.texture:SetAllPoints(marker)
+    marker.texture:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+
+    marker.border = marker:CreateTexture(nil, "BORDER")
+    marker.border:SetTexture("Interface\\Buttons\\WHITE8X8")
+    marker.border:SetPoint("TOPLEFT", marker, "TOPLEFT", -1, 1)
+    marker.border:SetPoint("BOTTOMRIGHT", marker, "BOTTOMRIGHT", 1, -1)
+    marker.border:SetVertexColor(0, 0, 0, 0.35)
+
+    marker.glow = marker:CreateTexture(nil, "OVERLAY")
+    marker.glow:SetTexture("Interface\\Buttons\\UI-ActionButton-Border")
+    marker.glow:SetBlendMode("ADD")
+    marker.glow:SetVertexColor(0.35, 0.8, 1, 0.95)
+    marker.glow:SetPoint("CENTER", marker, "CENTER", 0, 0)
+    marker.glow:SetSize(34, 34)
+    marker.glow:Hide()
+
+    marker.glowAnim = marker.glow:CreateAnimationGroup()
+    marker.glowAnim:SetLooping("BOUNCE")
+    local alpha = marker.glowAnim:CreateAnimation("Alpha")
+    alpha:SetFromAlpha(0.15)
+    alpha:SetToAlpha(0.9)
+    alpha:SetDuration(0.35)
+    alpha:SetSmoothing("IN_OUT")
+
+    marker.kindText = marker:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    marker.kindText:SetPoint("BOTTOM", marker, "TOP", 0, -2)
+    marker.kindText:SetFont(STANDARD_TEXT_FONT, 10, "OUTLINE")
+    marker.kindText:Hide()
+
+    return marker
+end
+
+local function BuildLegacyFallbackRanked(rec)
     if not rec then
-        iconTexture:SetTexture("Interface\\Icons\\INV_Misc_QuestionMark")
-        iconTexture:Show()
-        dumpIcon:SetTexture(ns.decision and ns.decision.GetTokenTexture and ns.decision.GetTokenTexture("HEROIC_STRIKE") or "Interface\\Icons\\INV_Misc_QuestionMark")
-        dumpIcon:SetAlpha(0.25)
-        skillText:SetText("N/A")
-        dumpText:SetText("Dump: N/A")
-        cooldownText:Hide()
-        if iconGlowAnim then
-            iconGlowAnim:Stop()
+        return {}
+    end
+    local ranked = {}
+    local function add(token, channel, reason, state)
+        if not token or token == "" or token == "NONE" or token == "HOLD" then
+            return
         end
-        SetNativeOverlayGlow(iconGlowHost, false)
-        SetPulse(iconGlow, iconGlowAnim, false)
-        SetShine(iconShine, iconGlowHost, false)
-        if dumpGlowAnim then
-            dumpGlowAnim:Stop()
+        ranked[#ranked + 1] = {
+            token = token,
+            channel = channel,
+            reason = reason,
+            cooldownRem = state and state.cooldownRem or 0,
+            rageCost = state and state.rageCost or 0,
+            rageEnough = state and state.rageEnough or true,
+            actionableNow = token ~= "WAIT" and (not state or ((state.cooldownRem or 0) <= 0.05 and state.rageEnough ~= false)),
+            passed = state and state.passed or true,
+        }
+    end
+    add(rec.displayNextSkill or rec.nextGcdSkill or rec.nextSkill, "gcd", rec.nextGcdReason or rec.reason, rec.displayNextState)
+    add(rec.offGcdSkill, "offgcd", rec.offGcdReason, rec.offGcdState)
+    add(rec.dumpQueueSkill or rec.dumpSkill, "dump", rec.dumpQueueReason or rec.dumpReason, nil)
+    return ranked
+end
+
+local function SetSlotPosition(slot, x, y)
+    slot.frame:ClearAllPoints()
+    slot.frame:SetPoint("TOPLEFT", iconFrame, "TOPLEFT", x, y)
+    slot.currentX = x
+    slot.y = y
+end
+
+local function StartSlotMove(slot, fromX, toX, y, fresh)
+    slot.targetX = toX
+    slot.y = y
+    slot.anim = {
+        fromX = fromX,
+        toX = toX,
+        y = y,
+        startedAt = GetTime(),
+        duration = SLOT_MOVE_DURATION,
+        fresh = fresh and true or false,
+    }
+    SetSlotPosition(slot, fromX, y)
+    slot.frame:SetAlpha(fresh and 0.35 or 0.8)
+end
+
+local function UpdateSlotAnimations()
+    local now = GetTime()
+    for i = 1, #rankedSlots do
+        local slot = rankedSlots[i]
+        if slot and slot.anim then
+            local anim = slot.anim
+            local progress = (now - anim.startedAt) / math.max(anim.duration or SLOT_MOVE_DURATION, 0.01)
+            if progress >= 1 then
+                SetSlotPosition(slot, anim.toX, anim.y)
+                slot.frame:SetAlpha(1)
+                slot.anim = nil
+            else
+                local eased = progress * (2 - progress)
+                local x = anim.fromX + ((anim.toX - anim.fromX) * eased)
+                SetSlotPosition(slot, x, anim.y)
+                slot.frame:SetAlpha(anim.fresh and (0.35 + 0.65 * eased) or (0.8 + 0.2 * eased))
+            end
         end
-        SetNativeOverlayGlow(dumpGlowHost, false)
-        SetPulse(dumpGlow, dumpGlowAnim, false)
-        SetShine(dumpShine, dumpGlowHost, false)
-        if dumpMarquee then
-            dumpMarquee:Hide()
-        end
-        if iconMarquee then
-            iconMarquee:Hide()
-        end
-        local showTextFallback = ns.IsDecisionIconTextShown()
-        skillText:SetShown(showTextFallback)
-        dumpText:SetShown(showTextFallback)
-        skillKeyText:SetText("")
-        skillKeyText:Hide()
-        dumpKeyText:SetText("")
-        dumpKeyText:Hide()
-        return
-    end
-
-    local displaySkill = rec.displayNextGcdSkill or rec.displayNextSkill or rec.nextGcdSkill or rec.nextSkill
-    local showMain = displaySkill and displaySkill ~= "WAIT" and displaySkill ~= "NONE"
-    if showMain then
-        iconTexture:SetTexture(ns.decision.GetTokenTexture(displaySkill))
-        iconTexture:Show()
-        skillText:SetText(SHORT_LABEL[displaySkill] or displaySkill or "")
-        local keyText = GetKeybindText(displaySkill)
-        if keyText then
-            skillKeyText:SetText(keyText)
-            skillKeyText:Show()
-        else
-            skillKeyText:SetText("")
-            skillKeyText:Hide()
-        end
-    else
-        iconTexture:SetTexture("")
-        iconTexture:Hide()
-        skillText:SetText("")
-        skillKeyText:SetText("")
-        skillKeyText:Hide()
-    end
-
-    local nextState = rec.displayNextState or {}
-    local cooldownRem = tonumber(nextState.cooldownRem) or 0
-    local rageEnough = nextState.rageEnough and true or false
-    if showMain and cooldownRem > 0.05 then
-        cooldownText:SetText(string.format("%.1f", cooldownRem))
-        cooldownText:Show()
-    else
-        cooldownText:Hide()
-    end
-    local shouldGlow = showMain and cooldownRem <= 0.05 and rageEnough
-    -- 改用 WoW 原生动作条可用高亮效果。
-    SetNativeOverlayGlow(iconGlowHost, shouldGlow)
-    SetPulse(iconGlow, iconGlowAnim, shouldGlow)
-    SetShine(iconShine, iconGlowHost, shouldGlow)
-    if iconMarquee then
-        iconMarquee:Hide()
-    end
-
-    local dumpSkill = rec.dumpQueueSkill or rec.dumpSkill or "HOLD"
-    local offGcdSkill = rec.offGcdSkill or "NONE"
-    local hostileCount = rec.context and rec.context.hostileCount or 1
-    local preferredDump = dumpSkill
-    if dumpSkill == "HOLD" then
-        preferredDump = hostileCount >= 2 and "CLEAVE" or "HEROIC_STRIKE"
-    end
-    if preferredDump == "CLEAVE" then
-        dumpIcon:SetTexture(ns.decision.GetTokenTexture("CLEAVE"))
-    else
-        dumpIcon:SetTexture(ns.decision.GetTokenTexture("HEROIC_STRIKE"))
-    end
-    dumpText:SetText("Dump: " .. dumpSkill .. "  OGCD: " .. offGcdSkill)
-    local dumpRageEnough = false
-    if rec and rec.context and type(rec.context.rage) == "number" and type(rec.reserveRage) == "number" then
-        if dumpSkill == "HEROIC_STRIKE" then
-            dumpRageEnough = (rec.context.rage - rec.reserveRage) >= 15
-        elseif dumpSkill == "CLEAVE" then
-            dumpRageEnough = (rec.context.rage - rec.reserveRage) >= 20
-        end
-    end
-    local dumpPredicted = dumpSkill == "HOLD"
-    local dumpUsable = IsDumpSkillUsable(preferredDump)
-    local dumpAvailable = (not dumpPredicted) and dumpRageEnough and dumpUsable
-    local queuedToken = GetQueuedDumpToken()
-    local dumpQueued = queuedToken ~= nil
-    local dumpDisplayToken = preferredDump
-
-    -- 队列优先：如果玩家已经按下 HS/Cleave 并进入“下一次主手挥击”队列，
-    -- 就以队列中的技能作为展示与高亮依据。
-    if dumpQueued then
-        dumpDisplayToken = queuedToken
-        if queuedToken == "CLEAVE" then
-            dumpIcon:SetTexture(ns.decision.GetTokenTexture("CLEAVE"))
-        else
-            dumpIcon:SetTexture(ns.decision.GetTokenTexture("HEROIC_STRIKE"))
-        end
-        dumpIcon:SetAlpha(1)
-    else
-        dumpIcon:SetAlpha(dumpAvailable and 1 or 0.35)
-    end
-    local dumpKey = GetKeybindText(dumpDisplayToken)
-    if dumpKey then
-        dumpKeyText:SetText(dumpKey)
-        dumpKeyText:Show()
-    else
-        dumpKeyText:SetText("")
-        dumpKeyText:Hide()
-    end
-
-    -- 仅进入施放队列时才做醒目高亮。
-    SetNativeOverlayGlow(dumpGlowHost, dumpQueued)
-    SetPulse(dumpGlow, dumpGlowAnim, dumpQueued)
-    SetShine(dumpShine, dumpGlowHost, dumpQueued)
-    if dumpMarquee then
-        dumpMarquee:Hide()
-    end
-
-    local showAny = showMain
-        or dumpSkill == "HEROIC_STRIKE"
-        or dumpSkill == "CLEAVE"
-        or (offGcdSkill ~= "NONE" and offGcdSkill ~= "WAIT")
-    frame:SetAlpha(showAny and 1 or 0.45)
-
-    skillText:SetShown(showText and showMain)
-    dumpText:SetShown(showText)
-
-    local backdropColor = rec.mode == "TPS_SURVIVAL" and { 0.1, 0.2, 0.35, 0.9 } or { 0.35, 0.22, 0.06, 0.9 }
-    local hideBackdrop = ns.IsDecisionIconLocked and ns.IsDecisionIconLocked()
-    if frame.SetBackdropColor then
-        frame:SetBackdropColor(backdropColor[1], backdropColor[2], backdropColor[3], hideBackdrop and 0 or backdropColor[4])
-    end
-    if frame.SetBackdropBorderColor then
-        frame:SetBackdropBorderColor(1, 1, 1, hideBackdrop and 0 or 0.6)
     end
 end
 
-function ns.RefreshDecisionIcon()
-    if not frame then
+local function FindPendingQueueEvent(token)
+    for i = 1, #timelineEvents do
+        local event = timelineEvents[i]
+        if event.kind == "queued" and event.token == token and event.pending then
+            return event
+        end
+    end
+    return nil
+end
+
+local function PushTimelineEvent(kind, token, pending, extra)
+    extra = extra or {}
+    if (not token or token == "" or token == "NONE" or token == "HOLD") and not extra.texture then
         return
     end
-    -- 先显式拉起，避免之前 Hide 后没有 OnUpdate 的情况。
-    if not frame:IsShown() then
-        frame:Show()
+    local now = GetTime()
+    if pending then
+        local existing = FindPendingQueueEvent(token)
+        if existing then
+            existing.at = now
+            return
+        end
+    else
+        local previous = timelineEvents[1]
+        if previous and previous.kind == kind and previous.token == token and previous.spellId == extra.spellId
+            and (not previous.pending) and math.abs(now - (previous.at or 0)) < 0.12 then
+            return
+        end
+    end
+    table.insert(timelineEvents, 1, {
+        kind = kind,
+        token = token,
+        spellId = extra.spellId,
+        spellName = extra.spellName,
+        texture = extra.texture,
+        label = extra.label,
+        at = now,
+        pending = pending and true or false,
+    })
+    while #timelineEvents > TIMELINE_MARKER_LIMIT do
+        table.remove(timelineEvents)
+    end
+end
+
+local function PushTimelineSpellCast(spellId, spellName)
+    local decision = ns.decision
+    local token = decision and decision.GetTokenForSpellId and decision.GetTokenForSpellId(spellId) or nil
+    if not token and decision and decision.GetTokenForSpellName then
+        token = decision.GetTokenForSpellName(spellName)
+    end
+
+    local texture = nil
+    if token and decision and decision.GetTokenTexture then
+        texture = decision.GetTokenTexture(token)
+    end
+    if not texture and spellId then
+        texture = GetSpellTexture(spellId)
+    end
+    if not texture and spellName then
+        texture = GetSpellTexture(spellName)
+    end
+
+    PushTimelineEvent("casted", token or spellName or tostring(spellId or ""), false, {
+        spellId = spellId,
+        spellName = spellName,
+        texture = texture,
+        label = token and SHORT_LABEL[token] or "",
+    })
+end
+
+local function ReleasePendingQueueEvent(token)
+    local event = FindPendingQueueEvent(token)
+    if event then
+        event.pending = false
+        event.at = GetTime()
+    else
+        PushTimelineEvent("queued", token, false)
+    end
+end
+
+local function PruneTimelineEvents()
+    local now = GetTime()
+    local window = ns.GetDecisionTimelineSeconds and ns.GetDecisionTimelineSeconds() or 5
+    for i = #timelineEvents, 1, -1 do
+        local event = timelineEvents[i]
+        if (not event) or ((not event.pending) and (now - (event.at or 0) > window)) then
+            table.remove(timelineEvents, i)
+        end
+    end
+end
+
+local function UpdateQueuedTimeline(rec)
+    local queuedToken = rec and rec.context and rec.context.queue and rec.context.queue.queuedDumpToken or nil
+    if queuedToken == "HOLD" then
+        queuedToken = nil
+    end
+    if queuedToken and renderState.lastQueuedToken ~= queuedToken then
+        PushTimelineEvent("queued", queuedToken, true)
+    elseif (not queuedToken) and renderState.lastQueuedToken then
+        ReleasePendingQueueEvent(renderState.lastQueuedToken)
+    elseif queuedToken and renderState.lastQueuedToken and queuedToken ~= renderState.lastQueuedToken then
+        ReleasePendingQueueEvent(renderState.lastQueuedToken)
+        PushTimelineEvent("queued", queuedToken, true)
+    end
+    renderState.lastQueuedToken = queuedToken
+end
+
+local function RefreshTimelineVisual()
+    if not timelinePanel then
+        return
+    end
+    PruneTimelineEvents()
+
+    local width = timelinePanel.bar:GetWidth()
+    local height = timelinePanel.bar:GetHeight()
+    if width <= 4 or height <= 4 then
+        return
+    end
+
+    local markerSize = math.max(height - 6, 12)
+    local window = ns.GetDecisionTimelineSeconds and ns.GetDecisionTimelineSeconds() or 5
+
+    local anyShown = false
+    for i = 1, TIMELINE_MARKER_LIMIT do
+        local marker = timelineMarkers[i]
+        local event = timelineEvents[i]
+        if not event then
+            marker:Hide()
+            SetPulse(marker.glow, marker.glowAnim, false)
+        else
+            local age = math.max(GetTime() - (event.at or 0), 0)
+            local progress = event.pending and 0 or math.min(age / math.max(window, 1), 1)
+            local x = math.floor(progress * math.max(width - markerSize - 2, 1))
+            marker:SetSize(markerSize, markerSize)
+            marker.glow:SetSize(markerSize + 18, markerSize + 18)
+            marker:ClearAllPoints()
+            marker:SetPoint("LEFT", timelinePanel.bar, "LEFT", x + 2, 0)
+            local texture = event.texture
+            if not texture and event.token and ns.decision and ns.decision.GetTokenTexture then
+                texture = ns.decision.GetTokenTexture(event.token)
+            end
+            marker.texture:SetTexture(texture or "Interface\\Icons\\INV_Misc_QuestionMark")
+            marker.texture:SetAlpha(event.pending and 1 or (1 - progress * 0.45))
+            if event.kind == "queued" then
+                marker.border:SetVertexColor(0.2, 0.45, 0.65, 0.55)
+            else
+                marker.border:SetVertexColor(0, 0, 0, 0.35)
+            end
+            marker.kindText:SetText(event.pending and "" or (event.label or ""))
+            if (not event.pending) and event.label and event.label ~= "" then
+                marker.kindText:Show()
+            else
+                marker.kindText:Hide()
+            end
+            SetPulse(marker.glow, marker.glowAnim, event.pending and event.kind == "queued")
+            marker:Show()
+            anyShown = true
+        end
+    end
+    timelinePanel:SetAlpha(anyShown and 1 or 0.72)
+end
+
+local function SetSlotVisual(slot, rec, index, showText)
+    if not slot then
+        return
+    end
+    if not rec or not rec.token or rec.token == "NONE" then
+        slot.texture:SetTexture("")
+        slot.texture:Hide()
+        slot.cooldownText:Hide()
+        slot.label:SetText("")
+        slot.label:Hide()
+        slot.keyText:SetText("")
+        slot.keyText:Hide()
+        SetNativeOverlayGlow(slot.glowHost, false)
+        SetPulse(slot.glow, slot.glowAnim, false)
+        slot.frame:Hide()
+        slot.lastToken = nil
+        return
+    end
+
+    slot.frame:Show()
+    local token = rec.token
+    local texture = ns.decision and ns.decision.GetTokenTexture and ns.decision.GetTokenTexture(token) or nil
+    slot.texture:SetTexture(texture or "Interface\\Icons\\INV_Misc_QuestionMark")
+    slot.texture:SetAlpha(token == "WAIT" and 0.62 or 1)
+    slot.texture:Show()
+
+    local cooldownRem = tonumber(rec.cooldownRem) or 0
+    if token ~= "WAIT" and cooldownRem > 0.05 then
+        slot.cooldownText:SetText(string.format("%.1f", cooldownRem))
+        slot.cooldownText:Show()
+    else
+        slot.cooldownText:Hide()
+    end
+
+    if showText then
+        slot.label:SetText(GetSlotLabel(index, rec))
+        slot.label:Show()
+    else
+        slot.label:SetText("")
+        slot.label:Hide()
+    end
+
+    local keyText = GetKeybindText(token)
+    if keyText and token ~= "WAIT" then
+        slot.keyText:SetText(keyText)
+        slot.keyText:Show()
+    else
+        slot.keyText:SetText("")
+        slot.keyText:Hide()
+    end
+
+    local shouldGlow = token ~= "WAIT" and rec.actionableNow and not rec.suppressGlow
+    SetNativeOverlayGlow(slot.glowHost, shouldGlow)
+    SetPulse(slot.glow, slot.glowAnim, shouldGlow)
+end
+
+local function ApplyIconLayout(showText)
+    if not iconFrame then
+        return nil
+    end
+    local presetName = ns.GetDecisionIconSizePreset()
+    local layoutKey = presetName .. ":" .. (showText and "text" or "notext")
+    if currentPreset == layoutKey and iconFrame._layout then
+        return iconFrame._layout
+    end
+    currentPreset = layoutKey
+
+    local cfg = SIZE_PRESETS[presetName] or SIZE_PRESETS.standard
+    local baseIcon = ns.GetDecisionIconBaseSize()
+    local gap = cfg.gap
+    local padX = cfg.padX
+    local sizes = {}
+    local iconRowWidth = padX * 2
+    local maxIcon = 0
+    for i = 1, 1 do
+        local size = math.max(math.floor(baseIcon + 0.5), 24)
+        sizes[i] = size
+        iconRowWidth = iconRowWidth + size
+        if i < 1 then
+            iconRowWidth = iconRowWidth + gap
+        end
+        if size > maxIcon then
+            maxIcon = size
+        end
+    end
+    local labelHeight = showText and cfg.labelHeight or 0
+    local iconBlockHeight = maxIcon + labelHeight + 8
+    local frameWidth = iconRowWidth
+    local frameHeight = cfg.topPad + iconBlockHeight + cfg.bottomPad
+    iconFrame:SetSize(frameWidth, frameHeight)
+
+    local slotX = {}
+    local x = padX
+    for i = 1, 1 do
+        local slot = rankedSlots[i]
+        local size = sizes[i]
+        slotX[i] = x
+        slot.frame:SetSize(size, iconBlockHeight)
+        slot.texture:SetSize(size, size)
+        slot.texture:ClearAllPoints()
+        slot.texture:SetPoint("TOP", slot.frame, "TOP", 0, 0)
+        slot.glowHost:ClearAllPoints()
+        slot.glowHost:SetPoint("CENTER", slot.texture, "CENTER", 0, 0)
+        slot.glowHost:SetSize(size, size)
+        slot.glow:SetSize(size + 40, size + 40)
+        slot.glow:ClearAllPoints()
+        slot.glow:SetPoint("CENTER", slot.texture, "CENTER", 0, 0)
+        slot.cooldownText:ClearAllPoints()
+        slot.cooldownText:SetPoint("BOTTOM", slot.texture, "TOP", 0, 2)
+        slot.cooldownText:SetWidth(size + 10)
+        slot.cooldownText:SetFont(STANDARD_TEXT_FONT, math.max(math.floor(size * 0.42), 10), "OUTLINE")
+        slot.label:ClearAllPoints()
+        slot.label:SetPoint("TOP", slot.texture, "BOTTOM", 0, -cfg.textGap)
+        slot.label:SetWidth(size + 10)
+        slot.keyText:ClearAllPoints()
+        slot.keyText:SetPoint("CENTER", slot.texture, "CENTER", 0, 0)
+        slot.keyText:SetWidth(size)
+        slot.keyText:SetFont(STANDARD_TEXT_FONT, math.max(math.floor(size * 0.5), 9), "OUTLINE")
+        x = x + size + gap
+    end
+
+    for i = 2, 3 do
+        local slot = rankedSlots[i]
+        if slot then
+            slot.frame:Hide()
+            slot.lastToken = nil
+        end
+    end
+
+    iconFrame._layout = {
+        slotX = slotX,
+        slotY = -cfg.topPad,
+    }
+    return iconFrame._layout
+end
+
+local function ApplyTimelineLayout()
+    if not timelinePanel then
+        return
+    end
+    local presetName = ns.GetDecisionIconSizePreset()
+    local cfg = SIZE_PRESETS[presetName] or SIZE_PRESETS.standard
+    local width = ns.GetDecisionTimelineWidth and ns.GetDecisionTimelineWidth() or 220
+    local height = cfg.timelineHeight + 18
+    timelinePanel:SetSize(width + 12, height + 12)
+    timelinePanel.bar:SetPoint("TOPLEFT", timelinePanel, "TOPLEFT", 6, -6)
+    timelinePanel.bar:SetPoint("BOTTOMRIGHT", timelinePanel, "BOTTOMRIGHT", -6, 6)
+end
+
+local function BuildVisibleRanked(rec)
+    local ranked = {}
+    if rec then
+        ranked = rec.rankedRecommendations or {}
+        if #ranked == 0 then
+            ranked = BuildLegacyFallbackRanked(rec)
+        end
+        if #ranked == 0 and rec.recommendedAction and rec.recommendedAction.token then
+            ranked[1] = rec.recommendedAction
+        end
+    end
+    local visible = {}
+    local queuedDumpToken = rec and rec.context and rec.context.queue and rec.context.queue.queuedDumpToken or nil
+    if queuedDumpToken == "HOLD" then
+        queuedDumpToken = nil
+    end
+    for i = 1, 3 do
+        local entry = ranked[i]
+        if entry and entry.token and entry.token ~= "NONE" and entry.token ~= "HOLD" then
+            if entry.token == "WAIT" then
+                visible[i] = nil
+            elseif queuedDumpToken and entry.token == queuedDumpToken then
+                visible[i] = nil
+            else
+                local out = {}
+                for k, v in pairs(entry) do
+                    out[k] = v
+                end
+                out.suppressGlow = i ~= 1
+                visible[i] = out
+            end
+        else
+            visible[i] = nil
+        end
+    end
+    return visible
+end
+
+local function UpdateSlots(rec, showText)
+    local layout = ApplyIconLayout(showText)
+    local ranked = BuildVisibleRanked(rec)
+    local previousTokenX = renderState.tokenX or {}
+    local nextTokenX = {}
+    local showAny = false
+
+    for i = 1, 1 do
+        local slot = rankedSlots[i]
+        local slotRec = ranked[i]
+        SetSlotVisual(slot, slotRec, i, showText)
+        if slotRec and slotRec.token then
+            showAny = true
+            local targetX = layout.slotX[i]
+            local targetY = layout.slotY
+            local priorX = previousTokenX[slotRec.token]
+            local changedToken = slot.lastToken ~= slotRec.token
+            if changedToken then
+                StartSlotMove(slot, priorX or (targetX + 20), targetX, targetY, true)
+            elseif math.abs((slot.targetX or targetX) - targetX) > 0.5 then
+                StartSlotMove(slot, slot.currentX or targetX, targetX, targetY, false)
+            elseif not slot.anim then
+                SetSlotPosition(slot, targetX, targetY)
+                slot.frame:SetAlpha(1)
+                slot.targetX = targetX
+            end
+            slot.lastToken = slotRec.token
+            nextTokenX[slotRec.token] = targetX
+        else
+            slot.lastToken = nil
+        end
+    end
+    for i = 2, 3 do
+        local slot = rankedSlots[i]
+        if slot then
+            SetSlotVisual(slot, nil, i, showText)
+        end
+    end
+    renderState.tokenX = nextTokenX
+    return showAny
+end
+
+local function Render()
+    if not iconFrame or not timelinePanel then
+        return
+    end
+    if not ns.IsDecisionIconShown() then
+        iconFrame:Hide()
+        timelinePanel:Hide()
+        return
+    end
+
+    iconFrame:Show()
+    timelinePanel:Show()
+
+    local showText = ns.IsDecisionIconTextShown()
+    ApplyTimelineLayout()
+
+    local rec = ns.decision and ns.decision.GetRecommendation and ns.decision.GetRecommendation() or nil
+    if not rec then
+        for i = 1, 3 do
+            SetSlotVisual(rankedSlots[i], nil, i, showText)
+        end
+        RefreshTimelineVisual()
+        return
+    end
+
+    local showIcons = UpdateSlots(rec, showText)
+    UpdateQueuedTimeline(rec)
+    RefreshTimelineVisual()
+
+    local showTimeline = (#timelineEvents > 0) or (renderState.lastQueuedToken ~= nil)
+    iconFrame:SetAlpha(showIcons and 1 or 0.45)
+    timelinePanel:SetAlpha(showTimeline and 1 or 0.72)
+
+    local backdropColor = rec.mode == "TPS_SURVIVAL" and { 0.1, 0.2, 0.35, 0.9 } or { 0.35, 0.22, 0.06, 0.9 }
+    local hideBackdrop = ns.IsDecisionIconLocked and ns.IsDecisionIconLocked()
+    if iconFrame.SetBackdropColor then
+        iconFrame:SetBackdropColor(backdropColor[1], backdropColor[2], backdropColor[3], hideBackdrop and 0 or backdropColor[4])
+    end
+    if iconFrame.SetBackdropBorderColor then
+        iconFrame:SetBackdropBorderColor(1, 1, 1, hideBackdrop and 0 or 0.6)
+    end
+    if timelinePanel.SetBackdropColor then
+        timelinePanel:SetBackdropColor(backdropColor[1], backdropColor[2], backdropColor[3], hideBackdrop and 0 or 0.82)
+    end
+    if timelinePanel.SetBackdropBorderColor then
+        timelinePanel:SetBackdropBorderColor(1, 1, 1, hideBackdrop and 0 or 0.6)
+    end
+    timelinePanel.bar:SetAlpha(hideBackdrop and 0 or 1)
+end
+
+function ns.RefreshDecisionIcon()
+    if not iconFrame or not timelinePanel then
+        return
     end
     Render()
 end
 
-local function Build()
+local function HandleEvent(event, arg1, _, arg3, arg4)
+    if event == "UNIT_POWER_UPDATE" and arg1 ~= "player" then
+        return
+    end
+    if event == "UNIT_AURA" then
+        if arg1 ~= "player" and arg1 ~= "target" and (type(arg1) ~= "string" or not strfind(arg1, "^party")) then
+            return
+        end
+    end
+    if event == "UNIT_SPELLCAST_SUCCEEDED" and arg1 == "player" then
+        local spellId = type(arg3) == "number" and arg3 or (type(arg4) == "number" and arg4 or nil)
+        local spellName = spellId and GetSpellInfo(spellId) or nil
+        if spellId and ns.decision and ns.decision.GetTokenForSpellId then
+            local token = ns.decision.GetTokenForSpellId(spellId)
+            if token == "HEROIC_STRIKE" or token == "CLEAVE" then
+                ReleasePendingQueueEvent(token)
+            end
+        end
+        if spellId or spellName then
+            PushTimelineSpellCast(spellId, spellName)
+        end
+    end
+    if ns.RefreshDecisionIcon then
+        ns.RefreshDecisionIcon()
+    end
+end
+
+local function BuildTimelinePanel()
     local template = BackdropTemplateMixin and "BackdropTemplate" or nil
-    frame = CreateFrame("Frame", "FuryDecisionHintIcon", UIParent, template)
-    frame:SetSize(110, 76)
-    frame:SetFrameStrata("HIGH")
-    frame:EnableMouse(true)
-    frame:SetMovable(true)
-    frame:RegisterForDrag("LeftButton")
-    frame:SetClampedToScreen(true)
-    frame:SetScript("OnDragStart", function(self)
+    timelinePanel = CreateFrame("Frame", "FuryDecisionTimelinePanel", UIParent, template)
+    timelinePanel:SetFrameStrata("HIGH")
+    timelinePanel:EnableMouse(true)
+    timelinePanel:SetMovable(true)
+    timelinePanel:RegisterForDrag("LeftButton")
+    timelinePanel:SetClampedToScreen(true)
+    timelinePanel:SetScript("OnDragStart", function(self)
         if ns.IsDecisionIconLocked and ns.IsDecisionIconLocked() then
             return
         end
         self:StartMoving()
     end)
-    frame:SetScript("OnDragStop", function(self)
+    timelinePanel:SetScript("OnDragStop", function(self)
         self:StopMovingOrSizing()
-        SavePosition()
+        SaveFramePosition(self, "timelinePoint")
     end)
-    frame:RegisterEvent("PLAYER_REGEN_DISABLED")
-    frame:RegisterEvent("PLAYER_REGEN_ENABLED")
-    frame:RegisterEvent("PLAYER_TARGET_CHANGED")
-    frame:RegisterEvent("PLAYER_ENTERING_WORLD")
-    frame:SetScript("OnEvent", function()
-        if ns.RefreshDecisionIcon then
-            ns.RefreshDecisionIcon()
-        end
-    end)
-
-    if frame.SetBackdrop then
-        frame:SetBackdrop({
+    if timelinePanel.SetBackdrop then
+        timelinePanel:SetBackdrop({
             bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background",
             edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
             edgeSize = 10,
@@ -649,130 +1003,87 @@ local function Build()
         })
     end
 
-    iconTexture = frame:CreateTexture(nil, "ARTWORK")
-    iconTexture:SetSize(50, 50)
-    iconTexture:SetPoint("LEFT", 5, 0)
-    iconTexture:SetTexCoord(0.08, 0.92, 0.08, 0.92)
-    iconGlowHost = CreateFrame("Button", nil, frame)
-    iconGlowHost:SetSize(50, 50)
-    iconGlowHost:SetPoint("CENTER", iconTexture, "CENTER", 0, 0)
-    iconGlowHost:SetAlpha(1)
-    iconGlowHost:EnableMouse(false)
-    iconShine = CreateFrame("Frame", nil, frame)
-    iconShine:SetAllPoints(iconGlowHost)
-    iconShine._furyShineOn = false
+    timelinePanel.bar = timelinePanel:CreateTexture(nil, "BACKGROUND")
+    timelinePanel.bar:SetColorTexture(0.08, 0.08, 0.08, 0.8)
 
-    iconGlow = frame:CreateTexture(nil, "OVERLAY")
-    iconGlow:SetTexture("Interface\\Buttons\\UI-ActionButton-Border")
-    iconGlow:SetBlendMode("ADD")
-    iconGlow:SetVertexColor(1, 0.95, 0.2, 0.85)
-    iconGlow:SetPoint("CENTER", iconTexture, "CENTER", 0, 0)
-    iconGlow:SetSize(90, 90)
-    iconGlow:Hide()
+    timelinePanel.caption = timelinePanel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    timelinePanel.caption:Hide()
 
-    iconGlowAnim = iconGlow:CreateAnimationGroup()
-    iconGlowAnim:SetLooping("BOUNCE")
-    local glowAlpha = iconGlowAnim:CreateAnimation("Alpha")
-    glowAlpha:SetFromAlpha(0.2)
-    glowAlpha:SetToAlpha(0.85)
-    glowAlpha:SetDuration(0.35)
-    glowAlpha:SetSmoothing("IN_OUT")
+    timelinePanel.windowText = timelinePanel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    timelinePanel.windowText:Hide()
 
-    iconMarquee = CreateFrame("Frame", nil, frame)
-    iconMarquee:SetPoint("TOPLEFT", iconTexture, "TOPLEFT", -MARQUEE_OUTER_OFFSET, MARQUEE_OUTER_OFFSET)
-    iconMarquee:SetPoint("BOTTOMRIGHT", iconTexture, "BOTTOMRIGHT", MARQUEE_OUTER_OFFSET, -MARQUEE_OUTER_OFFSET)
-    iconMarquee:SetFrameLevel(frame:GetFrameLevel() + 2)
-    iconMarquee:Hide()
-    BuildDashedMarquee(iconMarquee, marqueeSegments)
+    for i = 1, TIMELINE_MARKER_LIMIT do
+        timelineMarkers[i] = CreateTimelineMarker(timelinePanel)
+    end
+end
 
-    dumpIcon = frame:CreateTexture(nil, "ARTWORK")
-    dumpIcon:SetSize(50, 50)
-    dumpIcon:SetPoint("LEFT", iconTexture, "RIGHT", 5, 0)
-    dumpIcon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
-    dumpIcon:SetTexture(ns.decision and ns.decision.GetTokenTexture and ns.decision.GetTokenTexture("HEROIC_STRIKE") or "Interface\\Icons\\INV_Misc_QuestionMark")
-    dumpGlowHost = CreateFrame("Button", nil, frame)
-    dumpGlowHost:SetSize(50, 50)
-    dumpGlowHost:SetPoint("CENTER", dumpIcon, "CENTER", 0, 0)
-    dumpGlowHost:SetAlpha(1)
-    dumpGlowHost:EnableMouse(false)
-    dumpShine = CreateFrame("Frame", nil, frame)
-    dumpShine:SetAllPoints(dumpGlowHost)
-    dumpShine._furyShineOn = false
+local function BuildIconFrame()
+    local template = BackdropTemplateMixin and "BackdropTemplate" or nil
+    iconFrame = CreateFrame("Frame", "FuryDecisionHintIcon", UIParent, template)
+    iconFrame:SetFrameStrata("HIGH")
+    iconFrame:EnableMouse(true)
+    iconFrame:SetMovable(true)
+    iconFrame:RegisterForDrag("LeftButton")
+    iconFrame:SetClampedToScreen(true)
+    iconFrame:SetScript("OnDragStart", function(self)
+        if ns.IsDecisionIconLocked and ns.IsDecisionIconLocked() then
+            return
+        end
+        self:StartMoving()
+    end)
+    iconFrame:SetScript("OnDragStop", function(self)
+        self:StopMovingOrSizing()
+        SaveFramePosition(self, "iconPoint")
+    end)
+    if iconFrame.SetBackdrop then
+        iconFrame:SetBackdrop({
+            bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background",
+            edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+            edgeSize = 10,
+            insets = { left = 1, right = 1, top = 1, bottom = 1 },
+        })
+    end
 
-    dumpGlow = frame:CreateTexture(nil, "OVERLAY")
-    dumpGlow:SetTexture("Interface\\Buttons\\UI-ActionButton-Border")
-    dumpGlow:SetBlendMode("ADD")
-    dumpGlow:SetVertexColor(1, 0.95, 0.2, 0.85)
-    dumpGlow:SetPoint("CENTER", dumpIcon, "CENTER", 0, 0)
-    dumpGlow:SetSize(90, 90)
-    dumpGlow:Hide()
+    for i = 1, 3 do
+        rankedSlots[i] = CreateSlot(iconFrame)
+    end
 
-    dumpGlowAnim = dumpGlow:CreateAnimationGroup()
-    dumpGlowAnim:SetLooping("BOUNCE")
-    local dumpAlpha = dumpGlowAnim:CreateAnimation("Alpha")
-    dumpAlpha:SetFromAlpha(0.2)
-    dumpAlpha:SetToAlpha(0.85)
-    dumpAlpha:SetDuration(0.35)
-    dumpAlpha:SetSmoothing("IN_OUT")
+    iconFrame:RegisterEvent("PLAYER_REGEN_DISABLED")
+    iconFrame:RegisterEvent("PLAYER_REGEN_ENABLED")
+    iconFrame:RegisterEvent("PLAYER_TARGET_CHANGED")
+    iconFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
+    iconFrame:RegisterEvent("UNIT_POWER_UPDATE")
+    iconFrame:RegisterEvent("SPELL_UPDATE_COOLDOWN")
+    iconFrame:RegisterEvent("SPELL_UPDATE_USABLE")
+    iconFrame:RegisterEvent("ACTIONBAR_UPDATE_USABLE")
+    iconFrame:RegisterEvent("ACTIONBAR_UPDATE_STATE")
+    iconFrame:RegisterEvent("CURRENT_SPELL_CAST_CHANGED")
+    iconFrame:RegisterEvent("UNIT_AURA")
+    iconFrame:RegisterEvent("UNIT_SPELLCAST_SUCCEEDED")
+    iconFrame:RegisterEvent("PLAYER_EQUIPMENT_CHANGED")
+    iconFrame:SetScript("OnEvent", function(_, event, arg1, arg2, arg3, arg4)
+        HandleEvent(event, arg1, arg2, arg3, arg4)
+    end)
 
-    dumpMarquee = CreateFrame("Frame", nil, frame)
-    dumpMarquee:SetPoint("TOPLEFT", dumpIcon, "TOPLEFT", -MARQUEE_OUTER_OFFSET, MARQUEE_OUTER_OFFSET)
-    dumpMarquee:SetPoint("BOTTOMRIGHT", dumpIcon, "BOTTOMRIGHT", MARQUEE_OUTER_OFFSET, -MARQUEE_OUTER_OFFSET)
-    dumpMarquee:SetFrameLevel(frame:GetFrameLevel() + 2)
-    dumpMarquee:Hide()
-    BuildDashedMarquee(dumpMarquee, dumpMarqueeSegments)
-
-    skillText = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    skillText:SetPoint("TOP", iconTexture, "BOTTOM", 0, -2)
-    skillText:SetWidth(56)
-    skillText:SetJustifyH("CENTER")
-
-    dumpText = frame:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-    dumpText:SetPoint("TOP", dumpIcon, "BOTTOM", 0, -2)
-    dumpText:SetWidth(86)
-    dumpText:SetJustifyH("CENTER")
-
-    cooldownText = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-    cooldownText:SetPoint("BOTTOM", iconTexture, "TOP", 0, 2)
-    cooldownText:SetWidth(60)
-    cooldownText:SetJustifyH("CENTER")
-    cooldownText:SetTextColor(1, 0.95, 0.3)
-    cooldownText:SetFont(STANDARD_TEXT_FONT, 14, "OUTLINE")
-    cooldownText:Hide()
-
-    skillKeyText = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-    skillKeyText:SetPoint("CENTER", iconTexture, "CENTER", 0, 0)
-    skillKeyText:SetWidth(50)
-    skillKeyText:SetJustifyH("CENTER")
-    skillKeyText:SetTextColor(1, 1, 1)
-    skillKeyText:SetFont(STANDARD_TEXT_FONT, 30, "OUTLINE")
-    skillKeyText:Hide()
-
-    dumpKeyText = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-    dumpKeyText:SetPoint("CENTER", dumpIcon, "CENTER", 0, 0)
-    dumpKeyText:SetWidth(50)
-    dumpKeyText:SetJustifyH("CENTER")
-    dumpKeyText:SetTextColor(1, 1, 1)
-    dumpKeyText:SetFont(STANDARD_TEXT_FONT, 30, "OUTLINE")
-    dumpKeyText:Hide()
-
-    ApplyLayout(ns.IsDecisionIconTextShown())
-
-    frame:SetScript("OnUpdate", function(self, elapsed)
+    iconFrame:SetScript("OnUpdate", function(self, elapsed)
+        UpdateSlotAnimations()
+        RefreshTimelineVisual()
         self._tick = (self._tick or 0) + elapsed
-        if self._tick < 0.12 then
+        if self._tick < RENDER_TICK then
             return
         end
         self._tick = 0
         Render()
     end)
-
-    RestorePosition()
 end
 
 function IconModule:Init()
-    Build()
-    frame:SetShown(ns.IsDecisionIconShown() and true or false)
+    BuildIconFrame()
+    BuildTimelinePanel()
+    RestoreFramePosition(iconFrame, "iconPoint", 260, 0)
+    RestoreFramePosition(timelinePanel, "timelinePoint", 260, -86)
+    iconFrame:SetShown(ns.IsDecisionIconShown() and true or false)
+    timelinePanel:SetShown(ns.IsDecisionIconShown() and true or false)
     ns.RefreshDecisionIcon()
 end
 

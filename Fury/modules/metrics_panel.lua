@@ -56,6 +56,25 @@ local function FormatEvalLine(list, prefix, maxCount)
     return prefix .. " " .. table.concat(out, " | ")
 end
 
+local function FormatRankedLine(list, prefix, maxCount)
+    if not list or #list == 0 then
+        return prefix .. " -"
+    end
+    local out = {}
+    local limit = math.min(#list, maxCount or 3)
+    for i = 1, limit do
+        local e = list[i]
+        if e and e.token then
+            local reason = e.reason or (e.reasons and e.reasons[1]) or "-"
+            table.insert(out, string.format("%d:%s[%s](%s)", i, e.token, e.channel or "?", reason))
+        end
+    end
+    if #out == 0 then
+        return prefix .. " -"
+    end
+    return prefix .. " " .. table.concat(out, " | ")
+end
+
 local function SavePosition()
     if not panel or not ns.db or not ns.db.metrics then
         return
@@ -232,7 +251,16 @@ local function Render()
     SetLine(7, weightText)
     SetLine(8, setText)
     SetLine(9, procText)
-    SetLine(10, "GCD剩余: " .. FmtMs(gcdMs) .. "   GCD建议: " .. (decision.nextGcdSkill or decision.nextSkill))
+    local rec1 = decision.recommendedAction or ((decision.rankedRecommendations or {})[1])
+    local queueIndicator = decision.queueIndicator
+    local function fmtRanked(rec)
+        if not rec or not rec.token then
+            return "-"
+        end
+        local channel = rec.channel or "?"
+        return tostring(rec.token) .. "[" .. channel .. "]"
+    end
+    SetLine(10, "GCD剩余: " .. FmtMs(gcdMs) .. "   当前推荐: " .. fmtRanked(rec1))
     local habitInfo = decision.habitInfo
     local habitText = ""
     if habitInfo and habitInfo.enabled then
@@ -243,11 +271,13 @@ local function Render()
             tonumber(habitInfo.scoreDelta or 0)
         )
     end
-    SetLine(11, "GCD原因: " .. (decision.nextGcdReason or decision.reason or "-") .. habitText)
+    SetLine(11, "推荐1原因: " .. ((rec1 and rec1.reason) or decision.nextGcdReason or decision.reason or "-") .. habitText)
     SetLine(
         12,
-        "队列建议: " .. (decision.dumpQueueSkill or decision.dumpSkill or "HOLD")
-            .. "   OGCD建议: " .. (decision.offGcdSkill or "NONE")
+        "Queue状态: " .. (queueIndicator and queueIndicator.token or "EMPTY")
+            .. "   Queue解释: " .. (queueIndicator and queueIndicator.reason or "-")
+            .. "   兼容GCD: " .. (decision.nextGcdSkill or decision.nextSkill or "WAIT")
+            .. "   兼容OGCD: " .. (decision.offGcdSkill or "NONE")
             .. "   预留怒气: " .. (decision.reserveRage or 0)
             .. "   队列:" .. queuedText
             .. "   窗口:" .. qOpenText
@@ -255,8 +285,7 @@ local function Render()
     )
     SetLine(
         13,
-        "队列解释: " .. (decision.dumpQueueReason or decision.dumpReason or "-")
-            .. "   OGCD解释: " .. (decision.offGcdReason or "-")
+        "当前推荐解释: " .. ((rec1 and rec1.reason) or decision.recommendedReason or "-")
             .. string.format("   MH/OH: %d/%dms", timeToMhMs, timeToOhMs)
     )
     if ctx and ctx.cooldown then
@@ -277,10 +306,10 @@ local function Render()
         SetLine(18, "建议命中率: -")
     end
 
-    SetLine(19, FormatEvalLine(decision.nextEvaluations, "候选打分:", 3))
-    SetLine(20, FormatEvalLine(decision.nextRejected, "淘汰原因:", 2))
-    SetLine(21, FormatEvalLine(decision.dumpEvaluations, "队列打分:", 3))
-    SetLine(22, FormatEvalLine(decision.offGcdEvaluations, "OGCD打分:", 3))
+    SetLine(19, FormatRankedLine(decision.rankedRecommendations, "优先级树:", 3))
+    SetLine(20, FormatEvalLine(decision.nextEvaluations, "候选打分:", 3))
+    SetLine(21, FormatEvalLine(decision.dumpEvaluations, "Dump打分:", 3))
+    SetLine(22, FormatEvalLine(decision.offGcdEvaluations, "OffGCD打分:", 3))
     RelayoutByTextHeight()
 end
 

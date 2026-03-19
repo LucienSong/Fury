@@ -1,13 +1,47 @@
 local ADDON_NAME, ns = ...
-local VERSION = "1.9"
+local VERSION = "2.0"
 
 ns.name = ADDON_NAME
 ns.modules = {}
 ns.addon = CreateFrame("Frame")
 
-local CHANGELOG_ORDER = { "1.9", "1.8", "1.7", "1.6", "1.5", "1.4", "1.3", "1.2", "1.1", "1.0" }
+local CHANGELOG_ORDER = { "2.0", "1.10", "1.9", "1.8", "1.7", "1.6", "1.5", "1.4", "1.3", "1.2", "1.1", "1.0" }
 
 local CHANGELOG = {
+    ["2.0"] = {
+        date = "2026-03-20",
+        sections = {
+            ["新增"] = {
+                "主提示区收敛为单主图标，保留独立时间线展示最近施放与泄怒入队状态。",
+                "时间线改为记录玩家全部成功施放技能，不再只显示决策树里的候选动作。",
+            },
+            ["优化"] = {
+                "DPS 与 TPS 推荐改为两套更硬的优先级树，主提示不再只按混合分数排序。",
+                "脱战场景收紧为仅展示可预铺 Buff 的 Battle Shout，减少无意义技能干扰。",
+                "玩家文档、设置页简介与发布流程统一收口到 2.0 版本表述。",
+            },
+            ["修复"] = {
+                "修复主提示图标在收敛为单推荐位后背景板仍沿用旧宽度的问题。",
+            },
+        },
+    },
+    ["1.10"] = {
+        date = "2026-03-19",
+        sections = {
+            ["新增"] = {
+                "设置页新增“斩杀阶段仍允许断筋骗乱舞”开关，并在 /fury profile 中显示当前状态。",
+            },
+            ["优化"] = {
+                "运行时决策增加装备态与 Battle Shout 覆盖缓存，降低高频推荐时的重复扫描开销。",
+                "Bloodthirst 与 Sunder Armor 的评分构建收敛为共享逻辑，减少 DPS / TPS 分支漂移风险。",
+            },
+            ["修复"] = {
+                "修复多目标场景下目标 TTD 估算被错误均摊的问题，避免 Sunder Armor 被过早拒绝。",
+                "修复候选排序未区分 passed 状态的问题，避免 rejected 技能压过真实可执行候选。",
+                "修复 Execute 描述模型长期缓存不失效的问题，登录、升级和技能变化后会重新解析。",
+            },
+        },
+    },
     ["1.9"] = {
         date = "2026-03-19",
         sections = {
@@ -172,6 +206,9 @@ local defaults = {
         iconShowText = false,
         iconLocked = false,
         iconSizePreset = "standard",
+        iconBaseSize = 52,
+        timelineWidth = 220,
+        timelineSeconds = 5,
         modeOverride = "auto",
         decisionHorizonMs = 400,
         decisionConfig = {
@@ -197,6 +234,12 @@ local defaults = {
             relativePoint = "CENTER",
             x = 260,
             y = 0,
+        },
+        timelinePoint = {
+            point = "CENTER",
+            relativePoint = "CENTER",
+            x = 260,
+            y = -86,
         },
     },
     meta = {
@@ -233,10 +276,15 @@ local VALID_KEYBIND_TOKENS = {
     BLOODTHIRST = true,
     WHIRLWIND = true,
     EXECUTE = true,
+    HAMSTRING = true,
     SUNDER_ARMOR = true,
+    BATTLE_SHOUT = true,
+    BLOODRAGE = true,
     REVENGE = true,
     SHIELD_BLOCK = true,
     SHIELD_SLAM = true,
+    TAUNT = true,
+    MOCKING_BLOW = true,
     LAST_STAND = true,
     HEROIC_STRIKE = true,
     CLEAVE = true,
@@ -248,8 +296,8 @@ local function NormalizeKeybindText(text)
     if raw == "" then
         return nil
     end
-    if #raw > 10 then
-        raw = raw:sub(1, 10)
+    if #raw > 16 then
+        raw = raw:sub(1, 16)
     end
     return raw
 end
