@@ -110,8 +110,17 @@ function SlashModule:Init()
             else
                 local h = ns.GetDecisionHorizonMs and ns.GetDecisionHorizonMs() or 400
                 local cfg = ns.GetDecisionConfig and ns.GetDecisionConfig() or {}
+                local sunderDuty = cfg.sunderDutyMode or "self_stack"
+                local sunderDutyLabel = ns.GetSunderDutyModeLabel and ns.GetSunderDutyModeLabel(sunderDuty) or sunderDuty
                 ns.Print("统一参数入口: modules/decision_profile.lua（可直接编辑后 /reload）")
-                ns.Print("当前: baseline=tuned, horizon=" .. tostring(h) .. "ms, sunderHp=" .. tostring(cfg.sunderHpThreshold or 0) .. ", refresh=" .. tostring(cfg.sunderRefreshSeconds or 0) .. "s, stacks=" .. tostring(cfg.sunderTargetStacks or 0))
+                ns.Print(
+                    "当前: baseline=tuned, horizon=" .. tostring(h)
+                        .. "ms, sunderDuty=" .. sunderDuty
+                        .. "(" .. sunderDutyLabel .. ")"
+                        .. ", sunderHp=" .. tostring(cfg.sunderHpThreshold or 0)
+                        .. ", refresh=" .. tostring(cfg.sunderRefreshSeconds or 0)
+                        .. "s, stacks=" .. tostring(cfg.sunderTargetStacks or 0)
+                )
                 ns.Print("命令: /fury profile reset")
             end
         else

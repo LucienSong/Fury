@@ -314,7 +314,7 @@ function Metrics.TrackRecommendation(rec, ts)
         return
     end
 
-    local token = rec.nextSkill
+    local token = rec.nextGcdSkill or rec.nextSkill
     local decision = ns.decision
     local actionable = decision and decision.GetActionableTokens and decision.GetActionableTokens() or nil
     if not actionable or not actionable[token] then

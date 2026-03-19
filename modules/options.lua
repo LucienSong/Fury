@@ -24,6 +24,48 @@ local horizonLabel
 local sunderHpLabel
 local sunderRefreshLabel
 local sunderStacksLabel
+local sunderDutyLabel
+
+local SUNDER_DUTY_MODES = {
+    "self_stack",
+    "maintain_only",
+    "external_armor",
+}
+
+local function NormalizeSunderDutyMode(raw)
+    local mode = strlower(tostring(raw or "self_stack"))
+    for i = 1, #SUNDER_DUTY_MODES do
+        if SUNDER_DUTY_MODES[i] == mode then
+            return mode
+        end
+    end
+    return "self_stack"
+end
+
+local function GetSunderDutyModeLabel(mode)
+    if ns.GetSunderDutyModeLabel then
+        return ns.GetSunderDutyModeLabel(mode)
+    end
+    return NormalizeSunderDutyMode(mode)
+end
+
+local function ShiftSunderDutyMode(current, step)
+    local normalized = NormalizeSunderDutyMode(current)
+    local index = 1
+    for i = 1, #SUNDER_DUTY_MODES do
+        if SUNDER_DUTY_MODES[i] == normalized then
+            index = i
+            break
+        end
+    end
+    local nextIndex = index + (step or 1)
+    if nextIndex < 1 then
+        nextIndex = #SUNDER_DUTY_MODES
+    elseif nextIndex > #SUNDER_DUTY_MODES then
+        nextIndex = 1
+    end
+    return SUNDER_DUTY_MODES[nextIndex]
+end
 
 local KEYBIND_ROWS = {
     { token = "BLOODTHIRST", label = "嗜血 (BT)" },
@@ -106,6 +148,9 @@ local function RefreshOptionsState()
         if sunderStacksLabel then
             sunderStacksLabel:SetText("破甲目标层数: " .. tostring(cfg.sunderTargetStacks))
         end
+        if sunderDutyLabel then
+            sunderDutyLabel:SetText("破甲职责: " .. GetSunderDutyModeLabel(cfg.sunderDutyMode))
+        end
     end
     if activePage == "keybind" then
         RefreshKeybindState()
@@ -180,6 +225,7 @@ local function BuildAboutPage(parent)
     aboutBodyText:SetText(table.concat({
         "作者: Lucien   版本: v" .. tostring(ns.GetVersion and ns.GetVersion() or "-"),
         "Classic Hardcore Realm & ID: @硬汉-健将",
+        "GitHub: https://github.com/LucienSong/Fury",
         "",
         "Fury 是 WoW Classic Era 狂暴战决策辅助插件，核心目标是提升实战循环稳定性，",
         "在 DPS/TPS 场景下给出更可解释的下一技能建议。",
@@ -381,6 +427,34 @@ local function BuildSunderPage(parent)
         if ns.GetDecisionConfig and ns.SetDecisionConfig then
             local cfg = ns.GetDecisionConfig()
             ns.SetDecisionConfig({ sunderTargetStacks = cfg.sunderTargetStacks + 1 })
+            RefreshOptionsState()
+        end
+    end)
+
+    sunderDutyLabel = page:CreateFontString(nil, "ARTWORK", "GameFontNormal")
+    sunderDutyLabel:SetPoint("TOPLEFT", sunderStacksMinusButton, "BOTTOMLEFT", 0, -12)
+    sunderDutyLabel:SetText("")
+
+    local sunderDutyPrevButton = CreateFrame("Button", "FuryOptionsSunderDutyPrev", page, "UIPanelButtonTemplate")
+    sunderDutyPrevButton:SetSize(90, 22)
+    sunderDutyPrevButton:SetPoint("TOPLEFT", sunderDutyLabel, "BOTTOMLEFT", 0, -8)
+    sunderDutyPrevButton:SetText("上一档")
+    sunderDutyPrevButton:SetScript("OnClick", function()
+        if ns.GetDecisionConfig and ns.SetDecisionConfig then
+            local cfg = ns.GetDecisionConfig()
+            ns.SetDecisionConfig({ sunderDutyMode = ShiftSunderDutyMode(cfg.sunderDutyMode, -1) })
+            RefreshOptionsState()
+        end
+    end)
+
+    local sunderDutyNextButton = CreateFrame("Button", "FuryOptionsSunderDutyNext", page, "UIPanelButtonTemplate")
+    sunderDutyNextButton:SetSize(90, 22)
+    sunderDutyNextButton:SetPoint("LEFT", sunderDutyPrevButton, "RIGHT", 8, 0)
+    sunderDutyNextButton:SetText("下一档")
+    sunderDutyNextButton:SetScript("OnClick", function()
+        if ns.GetDecisionConfig and ns.SetDecisionConfig then
+            local cfg = ns.GetDecisionConfig()
+            ns.SetDecisionConfig({ sunderDutyMode = ShiftSunderDutyMode(cfg.sunderDutyMode, 1) })
             RefreshOptionsState()
         end
     end)

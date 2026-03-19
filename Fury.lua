@@ -1,13 +1,28 @@
 local ADDON_NAME, ns = ...
-local VERSION = "1.8"
+local VERSION = "1.9"
 
 ns.name = ADDON_NAME
 ns.modules = {}
 ns.addon = CreateFrame("Frame")
 
-local CHANGELOG_ORDER = { "1.8", "1.7", "1.6", "1.5", "1.4", "1.3", "1.2", "1.1", "1.0" }
+local CHANGELOG_ORDER = { "1.9", "1.8", "1.7", "1.6", "1.5", "1.4", "1.3", "1.2", "1.1", "1.0" }
 
 local CHANGELOG = {
+    ["1.9"] = {
+        date = "2026-03-19",
+        sections = {
+            ["新增"] = {
+                "插件介绍页新增 GitHub 项目地址，便于直接查看源码与发布分支。",
+            },
+            ["优化"] = {
+                "Battle Shout 的 WAIT 预测展示收紧，仅在真实需要补/续时才进入主提示预测。",
+                "发布脚本新增 addon-only 独立推送流程，便于只发布 addon/ 内容到 GitHub。",
+            },
+            ["修复"] = {
+                "修复 Battle Shout 在部分 WAIT / 无目标场景下短暂闪现、干扰判断的问题。",
+            },
+        },
+    },
     ["1.8"] = {
         date = "2026-03-18",
         sections = {

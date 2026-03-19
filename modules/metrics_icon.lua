@@ -27,10 +27,12 @@ local dumpKeyText
 local currentPreset
 
 local SHORT_LABEL = {
+    BLOODRAGE = "BR",
     BLOODTHIRST = "BT",
     WHIRLWIND = "WW",
     EXECUTE = "EXE",
     SUNDER_ARMOR = "SND",
+    BATTLE_SHOUT = "BS",
     REVENGE = "REV",
     SHIELD_BLOCK = "SB",
     SHIELD_SLAM = "SS",
@@ -481,7 +483,7 @@ local function Render()
         return
     end
 
-    local displaySkill = rec.displayNextSkill or rec.nextSkill
+    local displaySkill = rec.displayNextGcdSkill or rec.displayNextSkill or rec.nextGcdSkill or rec.nextSkill
     local showMain = displaySkill and displaySkill ~= "WAIT" and displaySkill ~= "NONE"
     if showMain then
         iconTexture:SetTexture(ns.decision.GetTokenTexture(displaySkill))
@@ -521,7 +523,8 @@ local function Render()
         iconMarquee:Hide()
     end
 
-    local dumpSkill = rec.dumpSkill or "HOLD"
+    local dumpSkill = rec.dumpQueueSkill or rec.dumpSkill or "HOLD"
+    local offGcdSkill = rec.offGcdSkill or "NONE"
     local hostileCount = rec.context and rec.context.hostileCount or 1
     local preferredDump = dumpSkill
     if dumpSkill == "HOLD" then
@@ -532,7 +535,7 @@ local function Render()
     else
         dumpIcon:SetTexture(ns.decision.GetTokenTexture("HEROIC_STRIKE"))
     end
-    dumpText:SetText("Dump: " .. dumpSkill)
+    dumpText:SetText("Dump: " .. dumpSkill .. "  OGCD: " .. offGcdSkill)
     local dumpRageEnough = false
     if rec and rec.context and type(rec.context.rage) == "number" and type(rec.reserveRage) == "number" then
         if dumpSkill == "HEROIC_STRIKE" then
@@ -578,7 +581,10 @@ local function Render()
         dumpMarquee:Hide()
     end
 
-    local showAny = showMain or dumpSkill == "HEROIC_STRIKE" or dumpSkill == "CLEAVE"
+    local showAny = showMain
+        or dumpSkill == "HEROIC_STRIKE"
+        or dumpSkill == "CLEAVE"
+        or (offGcdSkill ~= "NONE" and offGcdSkill ~= "WAIT")
     frame:SetAlpha(showAny and 1 or 0.45)
 
     skillText:SetShown(showText and showMain)

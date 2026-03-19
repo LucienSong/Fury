@@ -199,7 +199,12 @@ local function Render()
     local setProfiles = ctx and ctx.activeSetProfiles or nil
     local procProfiles = ctx and ctx.activeProcProfiles or nil
     local talentText = talents and string.format("天赋A/F/P=%d/%d/%d", talents.armsPoints or 0, talents.furyPoints or 0, talents.protPoints or 0) or "天赋:-"
-    local equipText = equip and string.format("双持:%s 套装最多:%d", equip.dualWield and "是" or "否", equip.setPieceMax or 0) or "装备:-"
+    local equipText = equip and string.format(
+        "双持武器:%s 盾:%s 套装最多:%d",
+        equip.dualWieldWeapon and "是" or "否",
+        equip.hasShield and "是" or "否",
+        equip.setPieceMax or 0
+    ) or "装备:-"
     local buffText = buffs and string.format(
         "Buff[F:%s DW:%s RK:%s]",
         buffs.flurry and "Y" or "N",
@@ -227,7 +232,7 @@ local function Render()
     SetLine(7, weightText)
     SetLine(8, setText)
     SetLine(9, procText)
-    SetLine(10, "GCD剩余: " .. FmtMs(gcdMs) .. "   推荐下个技能: " .. decision.nextSkill)
+    SetLine(10, "GCD剩余: " .. FmtMs(gcdMs) .. "   GCD建议: " .. (decision.nextGcdSkill or decision.nextSkill))
     local habitInfo = decision.habitInfo
     local habitText = ""
     if habitInfo and habitInfo.enabled then
@@ -238,22 +243,28 @@ local function Render()
             tonumber(habitInfo.scoreDelta or 0)
         )
     end
-    SetLine(11, "原因: " .. (decision.reason or "-") .. habitText)
+    SetLine(11, "GCD原因: " .. (decision.nextGcdReason or decision.reason or "-") .. habitText)
     SetLine(
         12,
-        "英勇/顺劈建议: " .. (decision.dumpSkill or "HOLD")
+        "队列建议: " .. (decision.dumpQueueSkill or decision.dumpSkill or "HOLD")
+            .. "   OGCD建议: " .. (decision.offGcdSkill or "NONE")
             .. "   预留怒气: " .. (decision.reserveRage or 0)
             .. "   队列:" .. queuedText
             .. "   窗口:" .. qOpenText
             .. "   断筋:" .. hamText
     )
-    SetLine(13, "解释: " .. (decision.dumpReason or "-") .. string.format("   MH/OH: %d/%dms", timeToMhMs, timeToOhMs))
+    SetLine(
+        13,
+        "队列解释: " .. (decision.dumpQueueReason or decision.dumpReason or "-")
+            .. "   OGCD解释: " .. (decision.offGcdReason or "-")
+            .. string.format("   MH/OH: %d/%dms", timeToMhMs, timeToOhMs)
+    )
     if ctx and ctx.cooldown then
-        SetLine(14, string.format("CD BT/WW/EX: %.2f / %.2f / %.2f", ctx.cooldown.bt or 0, ctx.cooldown.ww or 0, ctx.cooldown.ex or 0))
-        SetLine(15, string.format("CD REV/SB/SS: %.2f / %.2f / %.2f", ctx.cooldown.rev or 0, ctx.cooldown.sb or 0, ctx.cooldown.ss or 0))
+        SetLine(14, string.format("CD BR/BT/WW/EX: %.2f / %.2f / %.2f / %.2f", ctx.cooldown.br or 0, ctx.cooldown.bt or 0, ctx.cooldown.ww or 0, ctx.cooldown.ex or 0))
+        SetLine(15, string.format("CD REV/SB/SS/LS: %.2f / %.2f / %.2f / %.2f", ctx.cooldown.rev or 0, ctx.cooldown.sb or 0, ctx.cooldown.ss or 0, ctx.cooldown.ls or 0))
     else
-        SetLine(14, "CD BT/WW/EX: - / - / -")
-        SetLine(15, "CD REV/SB/SS: - / - / -")
+        SetLine(14, "CD BR/BT/WW/EX: - / - / - / -")
+        SetLine(15, "CD REV/SB/SS/LS: - / - / - / -")
     end
     if snapshot then
         SetLine(16, "DPS: " .. dpsText .. "   怒气浪费/饥饿: " .. FmtPct(snapshot.rage.wastePct) .. " / " .. FmtPct(snapshot.rage.starvedPct))
@@ -268,8 +279,8 @@ local function Render()
 
     SetLine(19, FormatEvalLine(decision.nextEvaluations, "候选打分:", 3))
     SetLine(20, FormatEvalLine(decision.nextRejected, "淘汰原因:", 2))
-    SetLine(21, FormatEvalLine(decision.dumpEvaluations, "泄怒打分:", 3))
-    SetLine(22, FormatEvalLine(decision.dumpRejected, "泄怒淘汰:", 2))
+    SetLine(21, FormatEvalLine(decision.dumpEvaluations, "队列打分:", 3))
+    SetLine(22, FormatEvalLine(decision.offGcdEvaluations, "OGCD打分:", 3))
     RelayoutByTextHeight()
 end
 
