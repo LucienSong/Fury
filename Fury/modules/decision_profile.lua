@@ -4,13 +4,21 @@ local DecisionProfileModule = {
     name = "DecisionProfile",
 }
 
-local function DeepCopy(v)
+local DefaultProfileCache = nil
+local MergedProfileCache = nil
+
+local function DeepCopy(v, seen)
     if type(v) ~= "table" then
         return v
     end
+    seen = seen or {}
+    if seen[v] then
+        return seen[v]
+    end
     local out = {}
+    seen[v] = out
     for k, sub in pairs(v) do
-        out[k] = DeepCopy(sub)
+        out[k] = DeepCopy(sub, seen)
     end
     return out
 end
@@ -30,6 +38,11 @@ local function DeepMerge(base, patch)
         end
     end
     return base
+end
+
+local function InvalidateProfileCaches()
+    DefaultProfileCache = nil
+    MergedProfileCache = nil
 end
 
 -- 统一参数入口（用户可直接修改此表，/reload 后生效）。
@@ -263,16 +276,23 @@ local USER_DECISION_PROFILE = {
 }
 
 function ns.GetDecisionProfile()
-    local base = DeepCopy(USER_DECISION_PROFILE)
+    if MergedProfileCache then
+        return MergedProfileCache
+    end
+    local base = DeepCopy(ns.GetDefaultDecisionProfile())
     local dbPatch = ns.db and ns.db.metrics and ns.db.metrics.decisionProfile or nil
     if type(dbPatch) == "table" then
         DeepMerge(base, dbPatch)
     end
-    return base
+    MergedProfileCache = base
+    return MergedProfileCache
 end
 
 function ns.GetDefaultDecisionProfile()
-    return DeepCopy(USER_DECISION_PROFILE)
+    if not DefaultProfileCache then
+        DefaultProfileCache = DeepCopy(USER_DECISION_PROFILE)
+    end
+    return DefaultProfileCache
 end
 
 function ns.SetDecisionProfile(partial)
@@ -281,6 +301,7 @@ function ns.SetDecisionProfile(partial)
     end
     ns.db.metrics.decisionProfile = ns.db.metrics.decisionProfile or {}
     DeepMerge(ns.db.metrics.decisionProfile, partial)
+    InvalidateProfileCaches()
 end
 
 function ns.ResetDecisionProfile()
@@ -288,6 +309,7 @@ function ns.ResetDecisionProfile()
         return
     end
     ns.db.metrics.decisionProfile = {}
+    InvalidateProfileCaches()
 end
 
 function DecisionProfileModule:Init()
@@ -297,6 +319,7 @@ function DecisionProfileModule:Init()
     ns.db.metrics.decisionProfile = ns.db.metrics.decisionProfile or {}
     -- SavedVariables 是账号级共享（Fury.toc: SavedVariables），此处不做角色隔离。
     ns.db.metrics.decisionProfilePreset = nil
+    InvalidateProfileCaches()
 end
 
 ns.RegisterModule(DecisionProfileModule)

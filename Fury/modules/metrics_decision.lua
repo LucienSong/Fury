@@ -2133,6 +2133,20 @@ local function SortEvaluations(list)
     end)
 end
 
+local function FilterUnknownEvaluations(list)
+    if not list then
+        return list
+    end
+    for i = #list, 1, -1 do
+        local entry = list[i]
+        local token = entry and entry.token or nil
+        if token and ABILITIES[token] and IsTokenKnown(token) == false then
+            table.remove(list, i)
+        end
+    end
+    return list
+end
+
 
 local function CalcSunderValueByTargetHp(targetHpPct, mode)
     -- 将目标血量映射到 [0,1]，血越高代表破甲持续收益期越长。
@@ -2344,6 +2358,7 @@ local function BuildOutOfCombatEvaluations(context)
     AddReason(wait, 0, "脱战状态，仅显示可预铺Buff")
     table.insert(list, wait)
 
+    FilterUnknownEvaluations(list)
     SortEvaluations(list)
     return list
 end
@@ -2877,6 +2892,7 @@ local function BuildDpsEvaluations(context)
     end
     table.insert(list, wait)
 
+    FilterUnknownEvaluations(list)
     SortEvaluations(list)
     return list
 end
@@ -3165,6 +3181,7 @@ local function BuildTpsEvaluations(context)
     table.insert(list, wait)
 
     ApplyLevelUtilityScale(shout, context, TOKENS.BATTLE_SHOUT)
+    FilterUnknownEvaluations(list)
     SortEvaluations(list)
     return list
 end
@@ -3500,6 +3517,7 @@ local function BuildOffGcdEvaluations(context, mainEvaluations)
     AddReason(none, 0, "当前无需插入Off-GCD动作")
     table.insert(list, none)
 
+    FilterUnknownEvaluations(list)
     SortEvaluations(list)
     return list
 end
@@ -3661,6 +3679,7 @@ local function BuildDumpEvaluations(context)
 
     table.insert(list, hold)
 
+    FilterUnknownEvaluations(list)
     SortEvaluations(list)
     return list, reserve
 end

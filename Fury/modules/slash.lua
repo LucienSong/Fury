@@ -29,10 +29,6 @@ function SlashModule:Init()
                 ns.SetDecisionIconTextShown(true)
             elseif rest == "text off" and ns.SetDecisionIconTextShown then
                 ns.SetDecisionIconTextShown(false)
-            elseif rest == "ooc on" and ns.SetDecisionIconShowOutOfCombat then
-                ns.SetDecisionIconShowOutOfCombat(true)
-            elseif rest == "ooc off" and ns.SetDecisionIconShowOutOfCombat then
-                ns.SetDecisionIconShowOutOfCombat(false)
             elseif rest == "lock on" and ns.SetDecisionIconLocked then
                 ns.SetDecisionIconLocked(true)
             elseif rest == "lock off" and ns.SetDecisionIconLocked then
@@ -44,10 +40,9 @@ function SlashModule:Init()
                 ns.ToggleDecisionIcon()
             end
             local textFlag = ns.IsDecisionIconTextShown and ns.IsDecisionIconTextShown() and "开" or "关"
-            local oocFlag = ns.IsDecisionIconShowOutOfCombat and ns.IsDecisionIconShowOutOfCombat() and "开" or "关"
             local lockFlag = ns.IsDecisionIconLocked and ns.IsDecisionIconLocked() and "开" or "关"
             local sizeLabel = ns.GetDecisionIconSizePresetLabel and ns.GetDecisionIconSizePresetLabel() or "标准"
-            ns.Print("图标: " .. (ns.IsDecisionIconShown() and "开启" or "关闭") .. "，文字: " .. textFlag .. "，非战斗显示: " .. oocFlag .. "，锁定: " .. lockFlag .. "，尺寸: " .. sizeLabel)
+            ns.Print("图标: " .. (ns.IsDecisionIconShown() and "开启" or "关闭") .. "，文字: " .. textFlag .. "，锁定: " .. lockFlag .. "，尺寸: " .. sizeLabel)
         elseif cmd == "horizon" then
             local ms = tonumber(rest)
             if not ms then
