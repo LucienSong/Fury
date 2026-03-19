@@ -25,6 +25,7 @@ local TOKENS = {
     BLOODTHIRST = "BLOODTHIRST",
     WHIRLWIND = "WHIRLWIND",
     EXECUTE = "EXECUTE",
+    OVERPOWER = "OVERPOWER",
     HAMSTRING = "HAMSTRING",
     HEROIC_STRIKE = "HEROIC_STRIKE",
     CLEAVE = "CLEAVE",
@@ -62,10 +63,12 @@ local SPELL_ID = {
     BLOODRAGE_BUFF = 2687,
     BERSERKER_RAGE_BUFF = 18499,
     HAMSTRING = 1715,
+    OVERPOWER = 7384,
     MOCKING_BLOW = 694,
 }
 
 local EXECUTE_RANK_IDS = { 5308, 20658, 20660, 20661, 20662 }
+local OVERPOWER_RANK_IDS = { 7384, 7887, 11584, 11585 }
 local HAMSTRING_RANK_IDS = { 1715, 7372, 7373 }
 local SUNDER_RANK_IDS = { 7386, 7405, 8380, 11596, 11597 }
 local HS_RANK_IDS = { 78, 284, 285, 1608, 11564, 11565, 11566, 11567, 25286 }
@@ -201,6 +204,7 @@ local ABILITIES = {
     [TOKENS.BLOODTHIRST] = { id = 23881, name = GetSpellInfo(23881) or "Bloodthirst", rage = 30 },
     [TOKENS.WHIRLWIND] = { id = 1680, name = GetSpellInfo(1680) or "Whirlwind", rage = 25 },
     [TOKENS.EXECUTE] = { id = 5308, name = GetSpellInfo(5308) or "Execute", rage = 15 },
+    [TOKENS.OVERPOWER] = { id = SPELL_ID.OVERPOWER, name = GetSpellInfo(SPELL_ID.OVERPOWER) or "Overpower", rage = 5 },
     [TOKENS.HAMSTRING] = { id = 1715, name = GetSpellInfo(1715) or "Hamstring", rage = 10 },
     [TOKENS.HEROIC_STRIKE] = { id = 78, name = GetSpellInfo(78) or "Heroic Strike", rage = 15 },
     [TOKENS.CLEAVE] = { id = 845, name = GetSpellInfo(845) or "Cleave", rage = 20 },
@@ -218,6 +222,9 @@ local TOKEN_BY_RANK_SPELL_ID = {
     -- Execute
     [5308] = TOKENS.EXECUTE, [20658] = TOKENS.EXECUTE, [20660] = TOKENS.EXECUTE,
     [20661] = TOKENS.EXECUTE, [20662] = TOKENS.EXECUTE,
+    -- Overpower
+    [7384] = TOKENS.OVERPOWER, [7887] = TOKENS.OVERPOWER, [11584] = TOKENS.OVERPOWER,
+    [11585] = TOKENS.OVERPOWER,
     -- Hamstring
     [1715] = TOKENS.HAMSTRING, [7372] = TOKENS.HAMSTRING, [7373] = TOKENS.HAMSTRING,
     -- Heroic Strike
@@ -244,6 +251,7 @@ local TOKEN_COOLDOWN_KEY = {
     [TOKENS.BLOODTHIRST] = "bt",
     [TOKENS.WHIRLWIND] = "ww",
     [TOKENS.EXECUTE] = "ex",
+    [TOKENS.OVERPOWER] = "op",
     [TOKENS.HAMSTRING] = nil,
     [TOKENS.REVENGE] = "rev",
     [TOKENS.SHIELD_BLOCK] = "sb",
@@ -258,6 +266,7 @@ local GCD_ACTIONABLE_TOKENS = {
     [TOKENS.BLOODTHIRST] = true,
     [TOKENS.WHIRLWIND] = true,
     [TOKENS.EXECUTE] = true,
+    [TOKENS.OVERPOWER] = true,
     [TOKENS.HAMSTRING] = true,
     [TOKENS.BATTLE_SHOUT] = true,
     [TOKENS.SUNDER_ARMOR] = true,
@@ -283,6 +292,7 @@ local TOKEN_BASE_COOLDOWN = {
     [TOKENS.BLOODTHIRST] = 6,
     [TOKENS.WHIRLWIND] = 10,
     [TOKENS.EXECUTE] = 0,
+    [TOKENS.OVERPOWER] = 5,
     [TOKENS.HAMSTRING] = 0,
     [TOKENS.BATTLE_SHOUT] = 0,
     [TOKENS.SUNDER_ARMOR] = 0,
@@ -299,6 +309,7 @@ local DPS_PREMIUM_TOKENS = {
     [TOKENS.BLOODTHIRST] = true,
     [TOKENS.WHIRLWIND] = true,
     [TOKENS.EXECUTE] = true,
+    [TOKENS.OVERPOWER] = true,
 }
 local TPS_PREMIUM_TOKENS = {
     [TOKENS.SHIELD_SLAM] = true,
@@ -515,7 +526,7 @@ function Decision.GetConfig()
     local cfg = (profile and profile.decisionConfig) or legacy or defaults
     local targetStacks = Clamp(tonumber(cfg.sunderTargetStacks) or 5, 1, 5)
     return {
-        sunderHpThreshold = Clamp(math.floor((tonumber(cfg.sunderHpThreshold) or 100000) + 0.5), 10000, 5000000),
+        sunderHpThreshold = Clamp(math.floor((tonumber(cfg.sunderHpThreshold) or 50000) + 0.5), 10000, 5000000),
         sunderRefreshSeconds = Clamp(tonumber(cfg.sunderRefreshSeconds) or 10, 1, 30),
         sunderTargetStacks = targetStacks,
         sunderDutyMode = NormalizeSunderDutyMode(cfg.sunderDutyMode),
@@ -825,6 +836,7 @@ end
 
 local RANK_IDS_BY_TOKEN = {
     [TOKENS.EXECUTE] = EXECUTE_RANK_IDS,
+    [TOKENS.OVERPOWER] = OVERPOWER_RANK_IDS,
     [TOKENS.HAMSTRING] = HAMSTRING_RANK_IDS,
     [TOKENS.BATTLE_SHOUT] = BATTLE_SHOUT_RANK_IDS,
     [TOKENS.SUNDER_ARMOR] = SUNDER_RANK_IDS,
@@ -844,6 +856,15 @@ local TOKEN_RANK_UTILITY_MODEL = {
             { id = 20660, value = 450 },
             { id = 20661, value = 600 },
             { id = 20662, value = 800 },
+        },
+    },
+    [TOKENS.OVERPOWER] = {
+        floorScale = 0.45,
+        ranks = {
+            { id = 7384, value = 35 },
+            { id = 7887, value = 50 },
+            { id = 11584, value = 80 },
+            { id = 11585, value = 125 },
         },
     },
     [TOKENS.HAMSTRING] = {
@@ -1450,8 +1471,9 @@ local function EstimateTargetTtd(targetHealthAbs, hostileCount)
     return targetHealthAbs / targetDps, targetDps, snapshot
 end
 
--- 前置声明：BuildContext 会提前读取该函数。
+-- 前置声明：BuildContext 会提前读取这些函数。
 local ReadHamstringState
+local ReadOverpowerState
 
 local function BuildContext()
     local cfg = Decision.GetConfig()
@@ -1478,6 +1500,7 @@ local function BuildContext()
     local buffs = ReadBuffState()
     local battleShoutState = ReadBattleShoutState(cfg)
     local hamstringState = ReadHamstringState()
+    local overpowerState = ReadOverpowerState()
     local sunderState = ReadSunderState()
     local threat = ReadThreatState()
     local setWeights, activeSetProfiles = BuildSetWeightState(equipment)
@@ -1563,10 +1586,12 @@ local function BuildContext()
         buffs = buffs,
         battleShoutState = battleShoutState,
         hamstringState = hamstringState,
+        overpowerState = overpowerState,
         sunderState = sunderState,
         known = {
             battleShout = IsTokenKnown(TOKENS.BATTLE_SHOUT),
             execute = IsTokenKnown(TOKENS.EXECUTE),
+            overpower = IsTokenKnown(TOKENS.OVERPOWER),
             bloodthirst = IsTokenKnown(TOKENS.BLOODTHIRST),
             whirlwind = IsTokenKnown(TOKENS.WHIRLWIND),
             hamstring = IsTokenKnown(TOKENS.HAMSTRING),
@@ -1582,6 +1607,7 @@ local function BuildContext()
             bt = GetCooldownRemaining(GetSpellNameByToken(TOKENS.BLOODTHIRST)),
             ww = GetCooldownRemaining(GetSpellNameByToken(TOKENS.WHIRLWIND)),
             ex = GetCooldownRemaining(GetSpellNameByToken(TOKENS.EXECUTE)),
+            op = GetCooldownRemaining(GetSpellNameByToken(TOKENS.OVERPOWER)),
             rev = GetCooldownRemaining(GetSpellNameByToken(TOKENS.REVENGE)),
             sb = GetCooldownRemaining(GetSpellNameByToken(TOKENS.SHIELD_BLOCK)),
             ss = GetCooldownRemaining(GetSpellNameByToken(TOKENS.SHIELD_SLAM)),
@@ -1759,6 +1785,29 @@ ReadHamstringState = function()
                 result.remaining = math.max(expirationTime - GetTime(), 0)
             end
             return result
+        end
+    end
+    return result
+end
+
+ReadOverpowerState = function()
+    local result = {
+        active = false,
+        targetGuid = nil,
+        remaining = 0,
+        triggeredAt = 0,
+    }
+    if not UnitExists("target") then
+        return result
+    end
+    local targetGuid = UnitGUID("target")
+    if ns.metrics and ns.metrics.GetOverpowerState then
+        local state = ns.metrics.GetOverpowerState(targetGuid, GetTime())
+        if type(state) == "table" then
+            result.active = state.active and true or false
+            result.targetGuid = state.targetGuid
+            result.remaining = tonumber(state.remaining) or 0
+            result.triggeredAt = tonumber(state.triggeredAt) or 0
         end
     end
     return result
@@ -2363,6 +2412,13 @@ local function BuildOutOfCombatEvaluations(context)
     return list
 end
 
+local function ShouldRejectSunderForLowHp(context, cfg, sunderState)
+    local threshold = tonumber(cfg and cfg.sunderHpThreshold) or 50000
+    local targetHealthAbs = tonumber(context and context.targetHealthAbs) or 0
+    local stacks = tonumber(sunderState and sunderState.stacks) or 0
+    return threshold > 0 and targetHealthAbs > 0 and targetHealthAbs <= threshold and stacks ~= 0
+end
+
 local function ApplyDpsSunderDuty(eval, context, cfg, sunderState)
     local duty = NormalizeSunderDutyMode(cfg and cfg.sunderDutyMode)
     local stacks = sunderState and sunderState.stacks or 0
@@ -2382,14 +2438,13 @@ local function ApplyDpsSunderDuty(eval, context, cfg, sunderState)
         return
     end
 
-    if duty == "maintain_only" and stacks <= 0 then
-        Reject(eval, "职责=maintain_only，不负责抢首层")
+    if ShouldRejectSunderForLowHp(context, cfg, sunderState) then
+        Reject(eval, "目标HP低于阈值且已有破甲层数，无需继续提示")
         return
     end
 
-    if duty == "self_stack" and (not context.targetBossLike) and (not context.estimatedTargetTtd)
-        and context.targetHealthAbs <= cfg.sunderHpThreshold then
-        Reject(eval, "职责=self_stack 且目标HP低于阈值(" .. cfg.sunderHpThreshold .. ")")
+    if duty == "maintain_only" and stacks <= 0 then
+        Reject(eval, "职责=maintain_only，不负责抢首层")
         return
     end
 
@@ -2412,9 +2467,6 @@ local function ApplyDpsSunderDuty(eval, context, cfg, sunderState)
     end
 
     if duty == "maintain_only" then
-        if (not context.estimatedTargetTtd) and context.targetHealthAbs <= cfg.sunderHpThreshold then
-            AddReason(eval, -8, "目标剩余血量较低，仅保留低强度维持价值")
-        end
         if stacks < targetStacks then
             AddReason(eval, 12 + missingStacks * 2, "职责=maintain_only，已有破甲后继续补层")
         elseif remaining < cfg.sunderRefreshSeconds then
@@ -2454,6 +2506,11 @@ local function ApplyTpsSunderDuty(eval, context, cfg, sunderState)
 
     if shortTtdReason then
         Reject(eval, shortTtdReason)
+        return
+    end
+
+    if ShouldRejectSunderForLowHp(context, cfg, sunderState) then
+        Reject(eval, "目标HP低于阈值且已有破甲层数，无需继续提示")
         return
     end
 
@@ -2657,6 +2714,43 @@ local function BuildDpsEvaluations(context)
         end
     end
     table.insert(list, ex)
+
+    local overpower = NewEval(TOKENS.OVERPOWER, 88)
+    ApplyCommonChecks(overpower, context, {
+        requireTarget = true,
+        usableToken = TOKENS.OVERPOWER,
+        rangeToken = TOKENS.OVERPOWER,
+        rageCost = ABILITIES[TOKENS.OVERPOWER].rage,
+        cooldown = context.cooldown.op,
+        predicate = function(ctx)
+            return ctx.stance == "Battle"
+                and ctx.overpowerState
+                and ctx.overpowerState.active
+        end,
+        predicateReason = "需战斗姿态且当前目标刚躲闪后才可用",
+    })
+    if overpower.passed then
+        local opState = context.overpowerState or {}
+        AddReason(overpower, 22, "目标刚躲闪，压制进入限时窗口")
+        if (opState.remaining or 0) <= 1.5 then
+            AddReason(overpower, 18, "压制窗口即将结束，应优先打出")
+        elseif (opState.remaining or 0) <= 3 then
+            AddReason(overpower, 10, "压制窗口有限，应尽快消化")
+        end
+        if context.buffs and context.buffs.offensiveBurst then
+            AddReason(overpower, 4, "爆发Buff窗口，压制收益提升")
+        end
+        if context.targetBossLike then
+            AddReason(overpower, 4, "Boss战中单次高效率技能更值得消化")
+        end
+        if w.dps ~= 0 then
+            AddReason(overpower, math.floor(w.dps * 0.25), "白名单权重: DPS倾向")
+        end
+        if dpsAggressiveBonus > 0 then
+            AddReason(overpower, dpsAggressiveBonus, "仇恨余量较高，可积极消化压制窗口")
+        end
+    end
+    table.insert(list, overpower)
 
     local bt = BuildBloodthirstEval(context, {
         baseScore = 82,
@@ -2877,6 +2971,7 @@ local function BuildDpsEvaluations(context)
     table.insert(list, ham)
 
     ApplyLevelUtilityScale(ex, context, TOKENS.EXECUTE)
+    ApplyLevelUtilityScale(overpower, context, TOKENS.OVERPOWER)
     ApplyLevelUtilityScale(ww, context, TOKENS.WHIRLWIND)
     ApplyLevelUtilityScale(shout, context, TOKENS.BATTLE_SHOUT)
     ApplyLevelUtilityScale(ham, context, TOKENS.HAMSTRING)
@@ -3374,7 +3469,7 @@ local function IsPredictableToken(context, entry)
         -- 满血/非斩杀阶段不应提前预测斩杀。
         return context.targetHealthPct and context.targetHealthPct <= 20
     end
-    if (token == TOKENS.SUNDER_ARMOR or token == TOKENS.BLOODTHIRST or token == TOKENS.WHIRLWIND or token == TOKENS.REVENGE
+    if (token == TOKENS.SUNDER_ARMOR or token == TOKENS.BLOODTHIRST or token == TOKENS.WHIRLWIND or token == TOKENS.OVERPOWER or token == TOKENS.REVENGE
         or token == TOKENS.SHIELD_SLAM or token == TOKENS.SHIELD_BLOCK or token == TOKENS.TAUNT or token == TOKENS.MOCKING_BLOW)
         and not context.targetExists then
         return false
@@ -4453,17 +4548,21 @@ local function ShouldRecommendTpsDump(context, dumpEval, revEval, ssEval, tauntE
 end
 
 local function SelectDpsPrimaryEval(context, nextEvaluations)
+    local op = GetPassedEvalByToken(nextEvaluations, TOKENS.OVERPOWER)
     local bt = GetPassedEvalByToken(nextEvaluations, TOKENS.BLOODTHIRST)
     local ww = GetPassedEvalByToken(nextEvaluations, TOKENS.WHIRLWIND)
     local ex = GetPassedEvalByToken(nextEvaluations, TOKENS.EXECUTE)
 
+    if op and context.overpowerState and (context.overpowerState.remaining or 0) <= 1.5 then
+        return op
+    end
     if (context.hostileCount or 1) >= 2 then
-        return ww or bt or ex
+        return op or ww or bt or ex
     end
     if context.targetHealthPct and context.targetHealthPct <= 20 then
-        return PickHigherScoreEval(ex, bt) or ww
+        return ex or op or bt or ww
     end
-    return bt or ww or ex
+    return op or bt or ww or ex
 end
 
 local function BuildCurrentRecommendedAction(context, nextEvaluations, dumpEvaluations, offGcdEvaluations)
@@ -4570,12 +4669,20 @@ end
 
 local function BuildOrderedDpsPremiumEvals(context, nextEvaluations)
     local orderedTokens = {}
+    local hasOverpower = context.overpowerState and context.overpowerState.active
+    local overpowerUrgent = hasOverpower and (context.overpowerState.remaining or 0) <= 1.5
     if (context.hostileCount or 1) >= 2 then
-        orderedTokens = { TOKENS.WHIRLWIND, TOKENS.BLOODTHIRST, TOKENS.EXECUTE }
+        orderedTokens = overpowerUrgent
+            and { TOKENS.OVERPOWER, TOKENS.WHIRLWIND, TOKENS.BLOODTHIRST, TOKENS.EXECUTE }
+            or { TOKENS.WHIRLWIND, TOKENS.OVERPOWER, TOKENS.BLOODTHIRST, TOKENS.EXECUTE }
     elseif context.targetHealthPct and context.targetHealthPct <= 20 then
-        orderedTokens = { TOKENS.EXECUTE, TOKENS.BLOODTHIRST, TOKENS.WHIRLWIND }
+        orderedTokens = overpowerUrgent
+            and { TOKENS.OVERPOWER, TOKENS.EXECUTE, TOKENS.BLOODTHIRST, TOKENS.WHIRLWIND }
+            or { TOKENS.EXECUTE, TOKENS.OVERPOWER, TOKENS.BLOODTHIRST, TOKENS.WHIRLWIND }
     else
-        orderedTokens = { TOKENS.BLOODTHIRST, TOKENS.WHIRLWIND, TOKENS.EXECUTE }
+        orderedTokens = hasOverpower
+            and { TOKENS.OVERPOWER, TOKENS.BLOODTHIRST, TOKENS.WHIRLWIND, TOKENS.EXECUTE }
+            or { TOKENS.BLOODTHIRST, TOKENS.WHIRLWIND, TOKENS.EXECUTE }
     end
 
     local ordered = {}

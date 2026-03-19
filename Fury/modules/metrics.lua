@@ -20,6 +20,11 @@ local Metrics = {
             lastMainSwingAt = 0,
             lastOffSwingAt = 0,
         },
+        overpowerWindow = {
+            targetGuid = nil,
+            triggeredAt = 0,
+            expireAt = 0,
+        },
     },
     listeners = {},
 }
@@ -160,6 +165,9 @@ function Metrics.StartFight(targetGuid)
     if Metrics.state.activeFight then
         return Metrics.state.activeFight
     end
+    Metrics.state.overpowerWindow.targetGuid = nil
+    Metrics.state.overpowerWindow.triggeredAt = 0
+    Metrics.state.overpowerWindow.expireAt = 0
     Metrics.state.activeFight = NewFight(targetGuid)
     Metrics.NotifyChanged()
     return Metrics.state.activeFight
@@ -253,6 +261,9 @@ function Metrics.EndFight()
     end
 
     Metrics.state.activeFight = nil
+    Metrics.state.overpowerWindow.targetGuid = nil
+    Metrics.state.overpowerWindow.triggeredAt = 0
+    Metrics.state.overpowerWindow.expireAt = 0
     Metrics.NotifyChanged()
     return summary
 end
@@ -267,6 +278,48 @@ end
 
 function Metrics.GetActiveFight()
     return Metrics.state.activeFight
+end
+
+function Metrics.RecordTargetDodged(targetGuid, ts)
+    if not targetGuid then
+        return
+    end
+    local nowTs = ts or Now()
+    local state = Metrics.state.overpowerWindow
+    state.targetGuid = targetGuid
+    state.triggeredAt = nowTs
+    state.expireAt = nowTs + 5
+end
+
+function Metrics.ClearOverpowerWindow(targetGuid)
+    local state = Metrics.state.overpowerWindow
+    if targetGuid and state.targetGuid and state.targetGuid ~= targetGuid then
+        return
+    end
+    state.targetGuid = nil
+    state.triggeredAt = 0
+    state.expireAt = 0
+end
+
+function Metrics.GetOverpowerState(targetGuid, ts)
+    local nowTs = ts or Now()
+    local state = Metrics.state.overpowerWindow or {}
+    if (state.expireAt or 0) <= nowTs then
+        Metrics.ClearOverpowerWindow()
+        return {
+            active = false,
+            targetGuid = nil,
+            remaining = 0,
+            triggeredAt = 0,
+        }
+    end
+    local sameTarget = targetGuid and state.targetGuid and targetGuid == state.targetGuid or false
+    return {
+        active = sameTarget and true or false,
+        targetGuid = state.targetGuid,
+        remaining = math.max((state.expireAt or 0) - nowTs, 0),
+        triggeredAt = state.triggeredAt or 0,
+    }
 end
 
 function Metrics.MarkHostile(guid, ts)
@@ -285,6 +338,7 @@ function Metrics.UnmarkHostile(guid)
         Metrics.state.recentHostiles[guid] = nil
         Metrics.state.hostileCountCache.expireAt = 0
     end
+    Metrics.ClearOverpowerWindow(guid)
 end
 
 function Metrics.GetRecentHostileCount(windowSeconds)
@@ -542,6 +596,9 @@ function Metrics.RecordCast(spellName, spellId, ts)
         rec.byToken[token] = rec.byToken[token] or { total = 0, matched = 0 }
         rec.byToken[token].matched = rec.byToken[token].matched + 1
         rec.pending = nil
+    end
+    if token == "OVERPOWER" then
+        Metrics.ClearOverpowerWindow()
     end
 
     if spellId == SPELL_ID.BLOODTHIRST or spellName == SPELL.BLOODTHIRST then

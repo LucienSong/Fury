@@ -53,6 +53,27 @@ local function GetSunderDutyModeLabel(mode)
     return NormalizeSunderDutyMode(mode)
 end
 
+local function FormatThousands(value)
+    local num = math.floor(tonumber(value) or 0)
+    if BreakUpLargeNumbers then
+        return BreakUpLargeNumbers(num)
+    end
+    local sign = ""
+    if num < 0 then
+        sign = "-"
+        num = math.abs(num)
+    end
+    local formatted = tostring(num)
+    while true do
+        local nextFormatted, count = formatted:gsub("^(-?%d+)(%d%d%d)", "%1,%2")
+        formatted = nextFormatted
+        if count == 0 then
+            break
+        end
+    end
+    return sign .. formatted
+end
+
 local function ShiftSunderDutyMode(current, step)
     local normalized = NormalizeSunderDutyMode(current)
     local index = 1
@@ -75,6 +96,7 @@ local KEYBIND_ROWS = {
     { token = "BLOODTHIRST", label = "嗜血 (BT)" },
     { token = "WHIRLWIND", label = "旋风斩 (WW)" },
     { token = "EXECUTE", label = "斩杀 (EXE)" },
+    { token = "OVERPOWER", label = "压制 (OP)" },
     { token = "HAMSTRING", label = "断筋 (HAM)" },
     { token = "SUNDER_ARMOR", label = "破甲 (SND)" },
     { token = "HEROIC_STRIKE", label = "英勇打击 (HS)" },
@@ -155,7 +177,7 @@ local function RefreshOptionsState()
     local cfg = ns.GetDecisionConfig and ns.GetDecisionConfig() or nil
     if cfg then
         if sunderHpLabel then
-            sunderHpLabel:SetText("DPS破甲HP阈值: " .. tostring(cfg.sunderHpThreshold))
+            sunderHpLabel:SetText("DPS破甲HP阈值: " .. FormatThousands(cfg.sunderHpThreshold))
         end
         if sunderRefreshLabel then
             sunderRefreshLabel:SetText("破甲刷新秒数: " .. tostring(math.floor(cfg.sunderRefreshSeconds + 0.5)) .. "s")

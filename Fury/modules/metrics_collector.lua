@@ -4,6 +4,22 @@ local CollectorModule = {
     name = "MetricsCollector",
 }
 
+local BATTLE_STANCE_ID = 2457
+
+local function IsBattleStanceActive()
+    if IsCurrentSpell and IsCurrentSpell(BATTLE_STANCE_ID) then
+        return true
+    end
+    local forms = GetNumShapeshiftForms and (GetNumShapeshiftForms() or 0) or 0
+    for i = 1, forms do
+        local _, _, active, _, spellId = GetShapeshiftFormInfo(i)
+        if active and spellId == BATTLE_STANCE_ID then
+            return true
+        end
+    end
+    return false
+end
+
 local function EnsureFightStarted()
     local metrics = ns.metrics
     if not metrics then
@@ -57,6 +73,9 @@ local function HandleCombatLog()
         local missType = data[12]
         local isOffHand = data[16]
         metrics.RecordSwingMiss(missType, isOffHand, GetTime())
+        if missType == "DODGE" and destGUID and IsBattleStanceActive() then
+            metrics.RecordTargetDodged(destGUID, GetTime())
+        end
         metrics.MarkHostile(destGUID, GetTime())
         return
     end
@@ -72,6 +91,9 @@ local function HandleCombatLog()
     if subEvent == "SPELL_MISSED" and sourceGUID == playerGUID then
         local missType = data[15]
         metrics.RecordSpellMiss(missType)
+        if missType == "DODGE" and destGUID and IsBattleStanceActive() then
+            metrics.RecordTargetDodged(destGUID, GetTime())
+        end
         metrics.MarkHostile(destGUID, GetTime())
         return
     end

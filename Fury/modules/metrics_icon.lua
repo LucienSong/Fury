@@ -26,6 +26,7 @@ local SHORT_LABEL = {
     BLOODTHIRST = "BT",
     WHIRLWIND = "WW",
     EXECUTE = "EXE",
+    OVERPOWER = "OP",
     SUNDER_ARMOR = "SND",
     BATTLE_SHOUT = "BS",
     REVENGE = "REV",

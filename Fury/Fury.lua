@@ -1,13 +1,28 @@
 local ADDON_NAME, ns = ...
-local VERSION = "2.1"
+local VERSION = "2.2"
 
 ns.name = ADDON_NAME
 ns.modules = {}
 ns.addon = CreateFrame("Frame")
 
-local CHANGELOG_ORDER = { "2.1", "2.0", "1.10", "1.9", "1.8", "1.7", "1.6", "1.5", "1.4", "1.3", "1.2", "1.1", "1.0" }
+local CHANGELOG_ORDER = { "2.2", "2.1", "2.0", "1.10", "1.9", "1.8", "1.7", "1.6", "1.5", "1.4", "1.3", "1.2", "1.1", "1.0" }
 
 local CHANGELOG = {
+    ["2.2"] = {
+        date = "2026-03-20",
+        sections = {
+            ["新增"] = {
+                "战斗姿态下新增压制（Overpower）决策与键位提示，在目标刚躲闪后的有效窗口内参与推荐。",
+            },
+            ["优化"] = {
+                "压制窗口监听收紧为仅在战斗姿态下记录目标躲闪，减少无效采集与额外开销。",
+                "破甲低血量阈值恢复为额外硬拦截条件：目标血量低于阈值且已有层数时不再提示，默认阈值调整为 50000。",
+            },
+            ["修复"] = {
+                "修复破甲设置页的 HP 阈值显示未做千分位格式化的问题。",
+            },
+        },
+    },
     ["2.1"] = {
         date = "2026-03-20",
         sections = {
@@ -226,7 +241,7 @@ local defaults = {
         modeOverride = "auto",
         decisionHorizonMs = 400,
         decisionConfig = {
-            sunderHpThreshold = 100000,
+            sunderHpThreshold = 50000,
             sunderRefreshSeconds = 10,
             sunderTargetStacks = 5,
         },
@@ -290,6 +305,7 @@ local VALID_KEYBIND_TOKENS = {
     BLOODTHIRST = true,
     WHIRLWIND = true,
     EXECUTE = true,
+    OVERPOWER = true,
     HAMSTRING = true,
     SUNDER_ARMOR = true,
     BATTLE_SHOUT = true,
