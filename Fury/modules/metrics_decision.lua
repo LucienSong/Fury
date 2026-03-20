@@ -103,6 +103,39 @@ local BattleShoutAuraCache = {
     scannedAt = 0,
 }
 
+-- Per-frame caches: avoid redundant aura scans within the same GetTime() frame.
+local PerFrameCache = {
+    frame = 0,
+    buffState = nil,
+    sunderState = nil,
+    hamstringState = nil,
+    procWeights = nil,
+    procActive = nil,
+}
+
+local function InvalidatePerFrameCache()
+    PerFrameCache.frame = 0
+    PerFrameCache.buffState = nil
+    PerFrameCache.sunderState = nil
+    PerFrameCache.hamstringState = nil
+    PerFrameCache.procWeights = nil
+    PerFrameCache.procActive = nil
+end
+
+local function IsPerFrameCacheValid()
+    local now = GetTime()
+    if PerFrameCache.frame ~= now then
+        PerFrameCache.frame = now
+        PerFrameCache.buffState = nil
+        PerFrameCache.sunderState = nil
+        PerFrameCache.hamstringState = nil
+        PerFrameCache.procWeights = nil
+        PerFrameCache.procActive = nil
+        return false
+    end
+    return true
+end
+
 -- 白名单精细化：setId -> bonus profile（可持续扩展）
 local SET_BONUS_PROFILES = {
     -- 示例（请按实测 setId 继续补充）：
@@ -877,6 +910,13 @@ local function GetStance()
         return "Battle", "fallback-index:1"
     end
 
+    -- B4 fix: warn once when all stance detection layers fail.
+    if not Decision._stanceNoneWarned then
+        Decision._stanceNoneWarned = true
+        if ns.Print then
+            ns.Print("|cffff9900[Fury]|r Stance detection fell through all fallbacks (activeForm=" .. tostring(activeForm) .. ", forms=" .. tostring(forms) .. "). Defaulting to None.")
+        end
+    end
     return "None", "unknown"
 end
 
@@ -1588,8 +1628,19 @@ local function ReadTrinketState()
     }
 end
 
-local function ReadBuffState()
+local function ComputeBuffState()
     local flurry = HasUnitAuraBySpellId("player", SPELL_ID.FLURRY_BUFF)
+    -- B2 fix: fallback to name-based detection if spell-ID match fails.
+    if not flurry then
+        for i = 1, 40 do
+            local name = UnitBuff("player", i)
+            if not name then break end
+            if name == "Flurry" or name == "\228\185\177\232\136\158" then
+                flurry = true
+                break
+            end
+        end
+    end
     local deathWish = HasUnitAuraBySpellId("player", SPELL_ID.DEATH_WISH_BUFF)
     local reck = HasUnitAuraBySpellId("player", SPELL_ID.RECKLESSNESS_BUFF)
     local bloodrage = HasUnitAuraBySpellId("player", SPELL_ID.BLOODRAGE_BUFF)
@@ -1605,6 +1656,16 @@ local function ReadBuffState()
         battleShoutRemaining = battleShoutRemaining,
         offensiveBurst = deathWish or reck,
     }
+end
+
+local function ReadBuffState()
+    IsPerFrameCacheValid()
+    if PerFrameCache.buffState then
+        return PerFrameCache.buffState
+    end
+    local state = ComputeBuffState()
+    PerFrameCache.buffState = state
+    return state
 end
 
 local function BuildSetWeightState(equipment)
@@ -1642,7 +1703,7 @@ local function BuildSetWeightState(equipment)
     return weights, active
 end
 
-local function BuildProcWeightState()
+local function ComputeProcWeightState()
     local weights = NewWeightBag()
     local active = {}
 
@@ -1660,6 +1721,17 @@ local function BuildProcWeightState()
         end
     end
 
+    return weights, active
+end
+
+local function BuildProcWeightState()
+    IsPerFrameCacheValid()
+    if PerFrameCache.procWeights then
+        return PerFrameCache.procWeights, PerFrameCache.procActive
+    end
+    local weights, active = ComputeProcWeightState()
+    PerFrameCache.procWeights = weights
+    PerFrameCache.procActive = active
     return weights, active
 end
 
@@ -1807,7 +1879,8 @@ local function EstimateTargetTtd(targetHealthAbs, hostileCount)
     if duration < 2 or totalDps <= 0 then
         return nil, totalDps, snapshot
     end
-    local targetDps = totalDps
+    -- B1 fix: divide total DPS by hostileCount to estimate single-target DPS.
+    local targetDps = totalDps / math.max(hostileCount or 1, 1)
     if targetDps <= 0 then
         return nil, targetDps, snapshot
     end
@@ -2065,7 +2138,16 @@ local function GetExecuteModel()
             model.maxExtraRage = parsed.maxExtraRage
             model.source = "spell-description:" .. tostring(spellId)
         else
+            -- B3 fix: warn once when description parsing fails (localization mismatch).
             model.source = "fallback-default:" .. tostring(spellId)
+            if ns.Print and not Decision._executeParseWarned then
+                Decision._executeParseWarned = true
+                ns.Print(string.format(
+                    "|cffff9900[Fury]|r Execute model parse failed for spellId=%s, using fallback (base=%d per=%d max=%d). Desc='%s'",
+                    tostring(spellId), model.baseDamage, model.perRage, model.maxExtraRage,
+                    tostring(desc or "nil"):sub(1, 80)
+                ))
+            end
         end
     end
 
@@ -2082,12 +2164,17 @@ local function EstimateExecuteDamage(rage)
 end
 
 ReadSunderState = function()
+    IsPerFrameCacheValid()
+    if PerFrameCache.sunderState then
+        return PerFrameCache.sunderState
+    end
     local result = {
         stacks = 0,
         remaining = 0,
         hasDebuff = false,
     }
     if not UnitExists("target") then
+        PerFrameCache.sunderState = result
         return result
     end
 
@@ -2102,18 +2189,25 @@ ReadSunderState = function()
             if expirationTime and expirationTime > 0 then
                 result.remaining = math.max(expirationTime - GetTime(), 0)
             end
+            PerFrameCache.sunderState = result
             return result
         end
     end
+    PerFrameCache.sunderState = result
     return result
 end
 
 ReadHamstringState = function()
+    IsPerFrameCacheValid()
+    if PerFrameCache.hamstringState then
+        return PerFrameCache.hamstringState
+    end
     local result = {
         hasDebuff = false,
         remaining = 0,
     }
     if not UnitExists("target") then
+        PerFrameCache.hamstringState = result
         return result
     end
     local hamName = GetSpellNameByToken(TOKENS.HAMSTRING)
@@ -2127,9 +2221,11 @@ ReadHamstringState = function()
             if expirationTime and expirationTime > 0 then
                 result.remaining = math.max(expirationTime - GetTime(), 0)
             end
+            PerFrameCache.hamstringState = result
             return result
         end
     end
+    PerFrameCache.hamstringState = result
     return result
 end
 
@@ -2513,16 +2609,19 @@ local function ApplyCommonChecks(eval, context, opts)
     end
 end
 
+-- P1: extract comparator to module-level local to avoid per-call closure allocation.
+local function EvalComparator(a, b)
+    if a.passed ~= b.passed then
+        return a.passed and not b.passed
+    end
+    if a.score == b.score then
+        return a.token < b.token
+    end
+    return a.score > b.score
+end
+
 local function SortEvaluations(list)
-    table.sort(list, function(a, b)
-        if a.passed ~= b.passed then
-            return a.passed and not b.passed
-        end
-        if a.score == b.score then
-            return a.token < b.token
-        end
-        return a.score > b.score
-    end)
+    table.sort(list, EvalComparator)
 end
 
 local function FilterUnknownEvaluations(list)
@@ -4153,39 +4252,48 @@ local function BuildDumpEvaluations(context)
     return list, reserve
 end
 
-local function ClonePlannerValue(value)
-    if type(value) ~= "table" then
-        return value
-    end
+-- P0 fix: replace recursive deep-clone with shallow-copy.
+-- Only mutable sub-tables (queue, cooldown, buffs, sunderState, hamstringState,
+-- battleShoutState, threat, swing) are shallow-copied. Read-only sub-tables
+-- (config, equipment, talents, trinket, weights, known, etc.) are shared by reference.
+local function ShallowCopy(t)
+    if type(t) ~= "table" then return t end
     local out = {}
-    for k, v in pairs(value) do
-        out[k] = ClonePlannerValue(v)
+    for k, v in pairs(t) do
+        out[k] = v
     end
     return out
 end
 
 local function BuildPlannerState(context)
-    local state = ClonePlannerValue(context)
-    state.queue = state.queue or {}
-    state.cooldown = state.cooldown or {}
-    state.buffs = state.buffs or {}
-    state.sunderState = state.sunderState or { stacks = 0, remaining = 0, hasDebuff = false }
-    state.hamstringState = state.hamstringState or { hasDebuff = false, remaining = 0 }
-    state.battleShoutState = state.battleShoutState or {
-        selfActive = state.buffs.battleShout and true or false,
-        selfRemaining = state.buffs.battleShoutRemaining or 0,
-        refreshSeconds = state.config and state.config.battleShoutRefreshSeconds or 12,
-        effectUnits = 1,
-        threatUnits = 1,
-        inRangeUnits = 1,
-        missingUnits = state.buffs.battleShout and 0 or 1,
-        buffedUnits = state.buffs.battleShout and 1 or 0,
-    }
-    state.threat = state.threat or {
-        status = 3,
-        scaledPct = 110,
-        isTanking = state.mode == "TPS_SURVIVAL",
-    }
+    -- Copy top-level scalars (rage, mode, gcdRem, etc.) plus reference read-only tables.
+    local state = ShallowCopy(context)
+    -- Shallow-copy only the mutable sub-tables so mutations don't leak back.
+    state.queue = ShallowCopy(context.queue or {})
+    state.cooldown = ShallowCopy(context.cooldown or {})
+    state.buffs = ShallowCopy(context.buffs or {})
+    state.swing = ShallowCopy(context.swing or {})
+    state.sunderState = ShallowCopy(context.sunderState or { stacks = 0, remaining = 0, hasDebuff = false })
+    state.hamstringState = ShallowCopy(context.hamstringState or { hasDebuff = false, remaining = 0 })
+    state.battleShoutState = context.battleShoutState
+        and ShallowCopy(context.battleShoutState)
+        or {
+            selfActive = state.buffs.battleShout and true or false,
+            selfRemaining = state.buffs.battleShoutRemaining or 0,
+            refreshSeconds = state.config and state.config.battleShoutRefreshSeconds or 12,
+            effectUnits = 1,
+            threatUnits = 1,
+            inRangeUnits = 1,
+            missingUnits = state.buffs.battleShout and 0 or 1,
+            buffedUnits = state.buffs.battleShout and 1 or 0,
+        }
+    state.threat = context.threat
+        and ShallowCopy(context.threat)
+        or {
+            status = 3,
+            scaledPct = 110,
+            isTanking = state.mode == "TPS_SURVIVAL",
+        }
     return state
 end
 
@@ -5392,63 +5500,61 @@ function Decision.GetRecommendation()
     end
 
     MaybePrintOverpowerDebug(context, recommendedAction, rankedRecommendations)
-    do
-        if (ns.IsMetricsPanelShown and ns.IsMetricsPanelShown())
-            and context
-            and context.mode == "DPS"
-            and context.targetExists then
-            local btEval = FindEvalByToken(nextEvaluations, TOKENS.BLOODTHIRST)
-            local btCooldown = GetTokenCooldownRemaining(TOKENS.BLOODTHIRST, context)
-            local projectedWindow = GetDpsProjectedPremiumWindow(context, TOKENS.BLOODTHIRST)
-            local readySoonEval = FindReadySoonDpsPremiumEval(context, nextEvaluations)
-            local queuedDumpToken = context.queue and context.queue.queuedDumpToken or TOKENS.HOLD
-            if btEval
-                or btCooldown <= math.max(projectedWindow + 0.15, 1.25)
-                or (queuedDumpToken and queuedDumpToken ~= TOKENS.HOLD)
-                or (context.known and context.known.bloodthirst == false) then
-                local btReason = (btEval and btEval.reasons and btEval.reasons[1]) or "-"
-                local recommendedToken = recommendedAction and recommendedAction.token or TOKENS.NONE
-                local ranked1 = rankedRecommendations and rankedRecommendations[1] and rankedRecommendations[1].token or TOKENS.NONE
-                local ranked2 = rankedRecommendations and rankedRecommendations[2] and rankedRecommendations[2].token or TOKENS.NONE
-                local ranked3 = rankedRecommendations and rankedRecommendations[3] and rankedRecommendations[3].token or TOKENS.NONE
-                local signature = table.concat({
-                    "bt",
+    -- P1 fix: guard entire debug block to avoid string construction when panel not shown.
+    if ns.IsMetricsPanelShown and ns.IsMetricsPanelShown()
+        and context
+        and context.mode == "DPS"
+        and context.targetExists
+        and ns.Print then
+        local btEval = FindEvalByToken(nextEvaluations, TOKENS.BLOODTHIRST)
+        local btCooldown = GetTokenCooldownRemaining(TOKENS.BLOODTHIRST, context)
+        local projectedWindow = GetDpsProjectedPremiumWindow(context, TOKENS.BLOODTHIRST)
+        local readySoonEval = FindReadySoonDpsPremiumEval(context, nextEvaluations)
+        local queuedDumpToken = context.queue and context.queue.queuedDumpToken or TOKENS.HOLD
+        if btEval
+            or btCooldown <= math.max(projectedWindow + 0.15, 1.25)
+            or (queuedDumpToken and queuedDumpToken ~= TOKENS.HOLD)
+            or (context.known and context.known.bloodthirst == false) then
+            local btReason = (btEval and btEval.reasons and btEval.reasons[1]) or "-"
+            local recommendedToken = recommendedAction and recommendedAction.token or TOKENS.NONE
+            local ranked1 = rankedRecommendations and rankedRecommendations[1] and rankedRecommendations[1].token or TOKENS.NONE
+            local ranked2 = rankedRecommendations and rankedRecommendations[2] and rankedRecommendations[2].token or TOKENS.NONE
+            local ranked3 = rankedRecommendations and rankedRecommendations[3] and rankedRecommendations[3].token or TOKENS.NONE
+            local signature = table.concat({
+                "bt",
+                tostring(recommendedToken),
+                tostring(ranked1),
+                tostring(ranked2),
+                tostring(ranked3),
+                tostring(queuedDumpToken),
+                tostring(btEval and btEval.passed and true or false),
+                tostring(context.known and context.known.bloodthirst or "nil"),
+                tostring(readySoonEval and readySoonEval.token or TOKENS.NONE),
+                string.format("%.2f", tonumber(btCooldown) or 0),
+                string.format("%.2f", tonumber(projectedWindow) or 0),
+                tostring((context.rage or 0) >= GetTokenRageCost(TOKENS.BLOODTHIRST)),
+                tostring(btReason),
+            }, "|")
+            local now = GetTime()
+            if OverpowerDebugState.btSignature ~= signature or (now - (OverpowerDebugState.btAt or 0)) >= 0.75 then
+                OverpowerDebugState.btSignature = signature
+                OverpowerDebugState.btAt = now
+                ns.Print(string.format(
+                    "BT debug rec=%s ranked=%s/%s/%s queued=%s known=%s btPassed=%s readySoon=%s btCd=%.2f win=%.2f rage=%d/%d reason=%s",
                     tostring(recommendedToken),
                     tostring(ranked1),
                     tostring(ranked2),
                     tostring(ranked3),
-                    tostring(queuedDumpToken),
-                    tostring(btEval and btEval.passed and true or false),
-                    tostring(context.known and context.known.bloodthirst or "nil"),
+                    tostring(queuedDumpToken or TOKENS.HOLD),
+                    (context.known and context.known.bloodthirst == false) and "N" or "Y",
+                    btEval and btEval.passed and "Y" or "N",
                     tostring(readySoonEval and readySoonEval.token or TOKENS.NONE),
-                    string.format("%.2f", tonumber(btCooldown) or 0),
-                    string.format("%.2f", tonumber(projectedWindow) or 0),
-                    tostring((context.rage or 0) >= GetTokenRageCost(TOKENS.BLOODTHIRST)),
-                    tostring(btReason),
-                }, "|")
-                local now = GetTime()
-                if OverpowerDebugState.btSignature ~= signature or (now - (OverpowerDebugState.btAt or 0)) >= 0.75 then
-                    OverpowerDebugState.btSignature = signature
-                    OverpowerDebugState.btAt = now
-                    if ns.Print then
-                        ns.Print(string.format(
-                            "BT debug rec=%s ranked=%s/%s/%s queued=%s known=%s btPassed=%s readySoon=%s btCd=%.2f win=%.2f rage=%d/%d reason=%s",
-                            tostring(recommendedToken),
-                            tostring(ranked1),
-                            tostring(ranked2),
-                            tostring(ranked3),
-                            tostring(queuedDumpToken or TOKENS.HOLD),
-                            (context.known and context.known.bloodthirst == false) and "N" or "Y",
-                            btEval and btEval.passed and "Y" or "N",
-                            tostring(readySoonEval and readySoonEval.token or TOKENS.NONE),
-                            tonumber(btCooldown) or 0,
-                            tonumber(projectedWindow) or 0,
-                            tonumber(context.rage or 0) or 0,
-                            GetTokenRageCost(TOKENS.BLOODTHIRST),
-                            tostring(btReason)
-                        ))
-                    end
-                end
+                    tonumber(btCooldown) or 0,
+                    tonumber(projectedWindow) or 0,
+                    tonumber(context.rage or 0) or 0,
+                    GetTokenRageCost(TOKENS.BLOODTHIRST),
+                    tostring(btReason)
+                ))
             end
         end
     end

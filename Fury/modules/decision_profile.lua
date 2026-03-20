@@ -23,7 +23,14 @@ local function DeepCopy(v, seen)
     return out
 end
 
-local function DeepMerge(base, patch)
+-- B5 fix: maxDepth guard prevents stack overflow from circular SavedVariables tables.
+local DEEP_MERGE_MAX_DEPTH = 8
+
+local function DeepMerge(base, patch, depth)
+    depth = (depth or 0) + 1
+    if depth > DEEP_MERGE_MAX_DEPTH then
+        return base
+    end
     if type(base) ~= "table" then
         base = {}
     end
@@ -32,7 +39,7 @@ local function DeepMerge(base, patch)
     end
     for k, v in pairs(patch) do
         if type(v) == "table" and type(base[k]) == "table" then
-            DeepMerge(base[k], v)
+            DeepMerge(base[k], v, depth)
         else
             base[k] = DeepCopy(v)
         end

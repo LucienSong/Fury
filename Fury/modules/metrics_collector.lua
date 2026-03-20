@@ -72,11 +72,18 @@ local function HandleCombatLog()
 
     local data = { CombatLogGetCurrentEventInfo() }
     local subEvent = data[2]
+    -- B7 fix: guard against nil/empty fields from non-standard combat log events.
+    if not subEvent then
+        return
+    end
     local sourceGUID = data[4]
     local destGUID = data[8]
     local spellId = data[12]
     local spellName = data[13]
     local playerGUID = UnitGUID("player")
+    if not playerGUID then
+        return
+    end
     local playerInvolved = sourceGUID == playerGUID or destGUID == playerGUID
 
     if not playerInvolved and sourceGUID ~= playerGUID then
@@ -197,7 +204,10 @@ function CollectorModule:Init()
 
     frame:SetScript("OnUpdate", function(_, elapsed)
         self._tick = (self._tick or 0) + elapsed
-        if self._tick < 0.2 then
+        -- P2 fix: use longer tick interval when out of combat to reduce idle CPU.
+        local inCombat = UnitAffectingCombat("player")
+        local tickInterval = inCombat and 0.2 or 0.5
+        if self._tick < tickInterval then
             return
         end
         self._tick = 0
