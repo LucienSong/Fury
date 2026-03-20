@@ -267,7 +267,7 @@ local function BuildAboutPage(parent)
         "Classic Hardcore Realm & ID: @硬汉-健将",
         "GitHub: https://github.com/LucienSong/Fury",
         "",
-        "Fury 2.4 是 WoW Classic Era 狂暴战决策辅助插件，核心目标是提升实战循环稳定性，",
+        "Fury 2.6 是 WoW Classic Era 狂暴战决策辅助插件，核心目标是提升实战循环稳定性，",
         "在 DPS/TPS 场景下给出更硬、更可解释的下一技能建议。",
         "",
         "功能简介：",

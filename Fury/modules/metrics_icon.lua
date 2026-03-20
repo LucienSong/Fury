@@ -1060,24 +1060,24 @@ local function BuildVisibleRanked(rec)
     if queuedDumpToken == "HOLD" then
         queuedDumpToken = nil
     end
-    for i = 1, 3 do
+    for i = 1, math.min(#ranked, 3) do
         local entry = ranked[i]
         if entry and entry.token and entry.token ~= "NONE" and entry.token ~= "HOLD" then
             if entry.token == "WAIT" then
-                visible[i] = nil
+                -- skip
             elseif queuedDumpToken and entry.token == queuedDumpToken then
-                visible[i] = nil
+                -- hide the already queued dump token, but keep later candidates left-aligned
             else
                 local out = {}
                 for k, v in pairs(entry) do
                     out[k] = v
                 end
-                out.suppressGlow = i ~= 1
-                visible[i] = out
+                visible[#visible + 1] = out
             end
-        else
-            visible[i] = nil
         end
+    end
+    for i = 1, #visible do
+        visible[i].suppressGlow = i ~= 1
     end
     return visible
 end

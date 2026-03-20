@@ -2,7 +2,7 @@
 ## Title: Fury
 ## Notes: Fury - Warrior decision assistant for WoW Classic Era
 ## Author: Lucien (@硬汉-健将)
-## Version: 2.5
+## Version: 2.6
 ## SavedVariables: FuryDB
 
 Fury.lua

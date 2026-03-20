@@ -54,6 +54,7 @@ local ReadSunderState
 local IsOffGcdToken
 local FindEvalByToken
 local ExtractAuraSpellId
+local ResolveHighestKnownSpellId
 
 local SPELL_ID = {
     BATTLE_STANCE = 2457,
@@ -403,6 +404,13 @@ function Decision.GetTokenForSpellName(spellName)
     if not spellName then
         return nil
     end
+    if ResolveHighestKnownSpellId then
+        ResolveHighestKnownSpellId(nil)
+    end
+    local cache = Decision._spellTokenCache
+    if cache and cache.spellNameToToken and cache.spellNameToToken[spellName] then
+        return cache.spellNameToToken[spellName]
+    end
     for token, info in pairs(ABILITIES) do
         if info.name == spellName then
             return token
@@ -414,6 +422,13 @@ end
 function Decision.GetTokenForSpellId(spellId)
     if not spellId then
         return nil
+    end
+    if ResolveHighestKnownSpellId then
+        ResolveHighestKnownSpellId(nil)
+    end
+    local cache = Decision._spellTokenCache
+    if cache and cache.tokenBySpellId and cache.tokenBySpellId[spellId] then
+        return cache.tokenBySpellId[spellId]
     end
     local byRank = TOKEN_BY_RANK_SPELL_ID[spellId]
     if byRank then
@@ -431,17 +446,23 @@ function Decision.GetTokenTexture(token)
     if token == TOKENS.WAIT or token == TOKENS.HOLD then
         return "Interface\\Icons\\INV_Misc_PocketWatch_01"
     end
+    if ResolveHighestKnownSpellId then
+        ResolveHighestKnownSpellId(nil)
+    end
     local info = ABILITIES[token]
-    if info and info.id then
-        local texture = GetSpellTexture(info.id)
+    local cache = Decision._spellTokenCache
+    local spellId = (cache and cache.highestSpellIdByToken and cache.highestSpellIdByToken[token])
+        or (info and info.id)
+    if spellId then
+        local texture = GetSpellTexture(spellId)
         if texture then
             return texture
         end
-        if info.name then
-            texture = GetSpellTexture(info.name)
-            if texture then
-                return texture
-            end
+    end
+    if info and info.name then
+        local texture = GetSpellTexture(info.name)
+        if texture then
+            return texture
         end
     end
     return "Interface\\Icons\\INV_Misc_QuestionMark"
@@ -998,15 +1019,80 @@ local TOKEN_RANK_UTILITY_MODEL = {
     },
 }
 
-local function ResolveHighestKnownSpellId(token)
+ResolveHighestKnownSpellId = function(token)
+    local cache = Decision._spellTokenCache
+    if not cache then
+        cache = {
+            tokenBySpellId = {},
+            highestSpellIdByToken = {},
+            spellNameByToken = {},
+            spellNameToToken = {},
+            knownByToken = {},
+        }
+        for spellId, mappedToken in pairs(TOKEN_BY_RANK_SPELL_ID) do
+            cache.tokenBySpellId[spellId] = mappedToken
+        end
+        for mappedToken, info in pairs(ABILITIES) do
+            if info and info.id then
+                cache.tokenBySpellId[info.id] = cache.tokenBySpellId[info.id] or mappedToken
+            end
+            if info and info.name then
+                cache.spellNameToToken[info.name] = cache.spellNameToToken[info.name] or mappedToken
+            end
+        end
+        if GetNumSpellTabs and GetSpellTabInfo and GetSpellBookItemInfo and BOOKTYPE_SPELL then
+            local tabs = GetNumSpellTabs() or 0
+            for tab = 1, tabs do
+                local _, _, offset, numSlots = GetSpellTabInfo(tab)
+                local startSlot = (offset or 0) + 1
+                local endSlot = (offset or 0) + (numSlots or 0)
+                for slot = startSlot, endSlot do
+                    local bookName = GetSpellBookItemName and GetSpellBookItemName(slot, BOOKTYPE_SPELL) or nil
+                    local _, spellId = GetSpellBookItemInfo(slot, BOOKTYPE_SPELL)
+                    local mappedToken = (spellId and cache.tokenBySpellId[spellId]) or nil
+                    if not mappedToken and bookName then
+                        mappedToken = cache.spellNameToToken[bookName]
+                    end
+                    if mappedToken then
+                        if spellId then
+                            cache.tokenBySpellId[spellId] = mappedToken
+                            cache.highestSpellIdByToken[mappedToken] = spellId
+                        end
+                        if bookName and bookName ~= "" then
+                            cache.spellNameByToken[mappedToken] = bookName
+                            cache.spellNameToToken[bookName] = mappedToken
+                        elseif spellId then
+                            local resolvedName = GetSpellInfo(spellId)
+                            if resolvedName and resolvedName ~= "" then
+                                cache.spellNameByToken[mappedToken] = resolvedName
+                                cache.spellNameToToken[resolvedName] = mappedToken
+                            end
+                        end
+                        cache.knownByToken[mappedToken] = true
+                    end
+                end
+            end
+        end
+        Decision._spellTokenCache = cache
+    end
+
+    if not token then
+        return nil
+    end
     local info = ABILITIES[token]
     if not info then
         return nil
+    end
+    if cache.highestSpellIdByToken and cache.highestSpellIdByToken[token] then
+        return cache.highestSpellIdByToken[token]
     end
     local ranks = RANK_IDS_BY_TOKEN[token]
     if type(ranks) == "table" and #ranks > 0 then
         for i = #ranks, 1, -1 do
             local id = ranks[i]
+            if cache.tokenBySpellId and cache.tokenBySpellId[id] == token then
+                return id
+            end
             if IsPlayerSpell and IsPlayerSpell(id) then
                 return id
             end
@@ -1021,14 +1107,28 @@ local function IsTokenKnown(token)
     if not id then
         return nil
     end
-    if IsPlayerSpell then
-        return IsPlayerSpell(id) and true or false
+    local cache = Decision._spellTokenCache
+    if cache and cache.knownByToken and cache.knownByToken[token] then
+        return true
     end
-    return nil
+    if IsSpellKnown and IsSpellKnown(id) then
+        return true
+    end
+    if IsPlayerSpell and IsPlayerSpell(id) then
+        return true
+    end
+    if FindSpellBookSlotBySpellID and FindSpellBookSlotBySpellID(id) then
+        return true
+    end
+    return false
 end
 
 local function GetSpellNameByToken(token)
     local id = ResolveHighestKnownSpellId(token)
+    local cache = Decision._spellTokenCache
+    if cache and cache.spellNameByToken and cache.spellNameByToken[token] then
+        return cache.spellNameByToken[token]
+    end
     if id then
         local name = GetSpellInfo(id)
         if name and name ~= "" then
@@ -2496,6 +2596,31 @@ local function IsBattleShoutRefreshWindow(shoutState)
     return shoutState and shoutState.effectUnits and shoutState.effectUnits > 0
 end
 
+local function GetDpsShoutProtectedMainSkill(context)
+    if not context or not context.inCombat or not context.targetExists then
+        return nil
+    end
+    local protectWindow = math.max(tonumber(context.gcdRem) or 0, 0) + 1.5
+    local cooldown = context.cooldown or {}
+
+    if context.targetHealthPct and context.targetHealthPct <= 20
+        and (cooldown.ex or math.huge) <= protectWindow then
+        return TOKENS.EXECUTE
+    end
+    if IsBattleStanceStrict() and context.overpowerState and context.overpowerState.active
+        and (context.overpowerState.remaining or 0) > 0
+        and (context.overpowerState.remaining or 0) <= protectWindow then
+        return TOKENS.OVERPOWER
+    end
+    if context.known and context.known.bloodthirst and (cooldown.bt or math.huge) <= protectWindow then
+        return TOKENS.BLOODTHIRST
+    end
+    if context.known and context.known.whirlwind and (cooldown.ww or math.huge) <= protectWindow then
+        return TOKENS.WHIRLWIND
+    end
+    return nil
+end
+
 local function BuildBattleShoutEval(context, cfg, mode, threat)
     local shoutCfg = cfg or context.config or Decision.GetConfig()
     local shoutState = context.battleShoutState or ReadBattleShoutState(shoutCfg)
@@ -2567,20 +2692,9 @@ local function BuildBattleShoutEval(context, cfg, mode, threat)
             return shout
         end
 
-        local protect = false
-        local rageCost = ABILITIES[TOKENS.BATTLE_SHOUT].rage
-        if context.cooldown.bt <= 1.25 then
-            protect = true
-        end
-        if context.cooldown.ww <= 1.25 then
-            protect = true
-        end
-        if context.targetHealthPct and context.targetHealthPct <= 20 and context.cooldown.ex <= 0.35
-        then
-            protect = true
-        end
-        if protect then
-            Reject(shout, "主循环保护窗内，Battle Shout 让位 BT/WW/EX")
+        local protectedToken = GetDpsShoutProtectedMainSkill(context)
+        if protectedToken then
+            Reject(shout, "主循环保护窗内，Battle Shout 让位 " .. tostring(protectedToken))
             return shout
         end
 
@@ -4769,8 +4883,35 @@ local function BuildRecommendedEntry(context, token, eval, channel, reason)
     }
 end
 
-local function ShouldRecommendDpsDump(context, dumpEval, premiumEval)
+local function BuildProjectedRecommendedEntry(context, eval, reason)
+    if not eval or not eval.token then
+        return nil
+    end
+    local token = eval.token
+    return {
+        token = token,
+        channel = "gcd",
+        reason = reason or "主技能即将转好，主提示提前预留",
+        rawScore = eval.score,
+        score = eval.score,
+        rageCost = GetTokenRageCost(token),
+        cooldownRem = GetTokenCooldownRemaining(token, context),
+        rageEnough = (context.rage or 0) >= GetTokenRageCost(token),
+        actionableNow = false,
+        passed = false,
+        projected = true,
+    }
+end
+
+local function ShouldRecommendDpsDump(context, dumpEval, premiumEval, readySoonPremiumEval)
     if not dumpEval or not dumpEval.passed then
+        return false
+    end
+    if context and context.cooldown and (context.cooldown.bt or math.huge) <= 0.05
+        and (context.rage or 0) >= GetTokenRageCost(TOKENS.BLOODTHIRST) then
+        return false
+    end
+    if readySoonPremiumEval then
         return false
     end
     if context.queue and context.queue.queuedDumpToken and context.queue.queuedDumpToken ~= TOKENS.HOLD then
@@ -4783,7 +4924,7 @@ local function ShouldRecommendDpsDump(context, dumpEval, premiumEval)
         return true
     end
     if premiumEval and premiumEval.passed then
-        return true
+        return false
     end
     return (context.rage or 0) >= 55 or ((context.queue and context.queue.timeToMain) or 99) <= 0.28
 end
@@ -4825,6 +4966,94 @@ local function SelectDpsPrimaryEval(context, nextEvaluations)
     return op or bt or ww or ex
 end
 
+local function BuildOrderedDpsPremiumTokens(context)
+    local orderedTokens = {}
+    local hasOverpower = context.overpowerState and context.overpowerState.active
+    local overpowerUrgent = hasOverpower and (context.overpowerState.remaining or 0) <= 1.5
+    if (context.hostileCount or 1) >= 2 then
+        orderedTokens = overpowerUrgent
+            and { TOKENS.OVERPOWER, TOKENS.WHIRLWIND, TOKENS.BLOODTHIRST, TOKENS.EXECUTE }
+            or { TOKENS.WHIRLWIND, TOKENS.OVERPOWER, TOKENS.BLOODTHIRST, TOKENS.EXECUTE }
+    elseif context.targetHealthPct and context.targetHealthPct <= 20 then
+        orderedTokens = overpowerUrgent
+            and { TOKENS.OVERPOWER, TOKENS.EXECUTE, TOKENS.BLOODTHIRST, TOKENS.WHIRLWIND }
+            or { TOKENS.EXECUTE, TOKENS.OVERPOWER, TOKENS.BLOODTHIRST, TOKENS.WHIRLWIND }
+    else
+        orderedTokens = hasOverpower
+            and { TOKENS.OVERPOWER, TOKENS.BLOODTHIRST, TOKENS.WHIRLWIND, TOKENS.EXECUTE }
+            or { TOKENS.BLOODTHIRST, TOKENS.WHIRLWIND, TOKENS.EXECUTE }
+    end
+    return orderedTokens
+end
+
+local function GetDpsProjectedPremiumWindow(context, token)
+    local baseWindow = 0.45
+    if token == TOKENS.WHIRLWIND then
+        baseWindow = 0.55
+    elseif token == TOKENS.EXECUTE or token == TOKENS.OVERPOWER then
+        baseWindow = 0.35
+    end
+    local habitCfg = Decision.GetHabitConfig()
+    local readySoonWindow = (tonumber(habitCfg and habitCfg.readySoonMs) or 350) / 1000
+    local gcdWindow = tonumber(context and context.gcdRem) or 0
+    return math.max(baseWindow, readySoonWindow, gcdWindow)
+end
+
+local function PassesProjectedDpsPremiumChecks(context, eval)
+    local token = eval and eval.token or nil
+    if not token or not DPS_PREMIUM_TOKENS[token] then
+        return false
+    end
+    if not context or not context.inCombat or not context.targetExists then
+        return false
+    end
+    if IsTokenKnown(token) == false then
+        return false
+    end
+    local spellName = GetSpellNameByToken(token)
+    if spellName and not InRangeOrNil(spellName, "target") then
+        return false
+    end
+    if spellName and not IsUsable(spellName) then
+        return false
+    end
+    if (context.rage or 0) < GetTokenRageCost(token) then
+        return false
+    end
+    if token == TOKENS.EXECUTE then
+        return context.targetHealthPct and context.targetHealthPct <= 20
+    end
+    if token == TOKENS.OVERPOWER then
+        local opState = context.overpowerState or {}
+        local targetGuid = UnitGUID("target")
+        if not IsBattleStanceStrict() then
+            return false
+        end
+        if not opState.active or (opState.remaining or 0) <= 0 then
+            return false
+        end
+        if opState.targetGuid and targetGuid and opState.targetGuid ~= targetGuid then
+            return false
+        end
+    end
+    return true
+end
+
+local function FindReadySoonDpsPremiumEval(context, nextEvaluations)
+    for _, token in ipairs(BuildOrderedDpsPremiumTokens(context)) do
+        local eval = FindEvalByToken(nextEvaluations, token)
+        if eval and not eval.passed then
+            local cooldownRem = GetTokenCooldownRemaining(token, context)
+            if cooldownRem > 0.05
+                and cooldownRem <= GetDpsProjectedPremiumWindow(context, token)
+                and PassesProjectedDpsPremiumChecks(context, eval) then
+                return eval
+            end
+        end
+    end
+    return nil
+end
+
 local function BuildCurrentRecommendedAction(context, nextEvaluations, dumpEvaluations, offGcdEvaluations)
     local queueIndicator = BuildQueueIndicator(context)
     local bestDumpToken, bestDumpReason, bestDumpEval = PickBest(dumpEvaluations)
@@ -4835,18 +5064,23 @@ local function BuildCurrentRecommendedAction(context, nextEvaluations, dumpEvalu
     if context.mode == "DPS" then
         local bloodrageEval = GetPassedEvalByToken(offGcdEvaluations, TOKENS.BLOODRAGE)
         local premiumEval = SelectDpsPrimaryEval(context, nextEvaluations)
+        local readySoonPremiumEval = (not premiumEval) and FindReadySoonDpsPremiumEval(context, nextEvaluations) or nil
         local sunderEval = GetPassedEvalByToken(nextEvaluations, TOKENS.SUNDER_ARMOR)
         local shoutEval = GetPassedEvalByToken(nextEvaluations, TOKENS.BATTLE_SHOUT)
         local hamEval = GetPassedEvalByToken(nextEvaluations, TOKENS.HAMSTRING)
 
-        if bloodrageEval and not premiumEval and (context.rage or 0) < 30 and not IsPlannerBloodrageRedundant(context) then
+        if bloodrageEval and not premiumEval and not readySoonPremiumEval
+            and (context.rage or 0) < 30 and not IsPlannerBloodrageRedundant(context) then
             return BuildRecommendedEntry(context, TOKENS.BLOODRAGE, bloodrageEval, "offgcd"), queueIndicator
-        end
-        if ShouldRecommendDpsDump(context, bestDumpEval, premiumEval) then
-            return BuildRecommendedEntry(context, bestDumpToken, bestDumpEval, "dump", bestDumpReason), queueIndicator
         end
         if premiumEval then
             return BuildRecommendedEntry(context, premiumEval.token, premiumEval, "gcd"), queueIndicator
+        end
+        if readySoonPremiumEval then
+            return BuildProjectedRecommendedEntry(context, readySoonPremiumEval, "主技能即将转好，主提示提前预留"), queueIndicator
+        end
+        if ShouldRecommendDpsDump(context, bestDumpEval, premiumEval, readySoonPremiumEval) then
+            return BuildRecommendedEntry(context, bestDumpToken, bestDumpEval, "dump", bestDumpReason), queueIndicator
         end
         if bloodrageEval and (context.rage or 0) < 30 and not IsPlannerBloodrageRedundant(context) then
             return BuildRecommendedEntry(context, TOKENS.BLOODRAGE, bloodrageEval, "offgcd"), queueIndicator
@@ -4928,25 +5162,8 @@ local function AppendRecommendedEntry(list, seen, entry)
 end
 
 local function BuildOrderedDpsPremiumEvals(context, nextEvaluations)
-    local orderedTokens = {}
-    local hasOverpower = context.overpowerState and context.overpowerState.active
-    local overpowerUrgent = hasOverpower and (context.overpowerState.remaining or 0) <= 1.5
-    if (context.hostileCount or 1) >= 2 then
-        orderedTokens = overpowerUrgent
-            and { TOKENS.OVERPOWER, TOKENS.WHIRLWIND, TOKENS.BLOODTHIRST, TOKENS.EXECUTE }
-            or { TOKENS.WHIRLWIND, TOKENS.OVERPOWER, TOKENS.BLOODTHIRST, TOKENS.EXECUTE }
-    elseif context.targetHealthPct and context.targetHealthPct <= 20 then
-        orderedTokens = overpowerUrgent
-            and { TOKENS.OVERPOWER, TOKENS.EXECUTE, TOKENS.BLOODTHIRST, TOKENS.WHIRLWIND }
-            or { TOKENS.EXECUTE, TOKENS.OVERPOWER, TOKENS.BLOODTHIRST, TOKENS.WHIRLWIND }
-    else
-        orderedTokens = hasOverpower
-            and { TOKENS.OVERPOWER, TOKENS.BLOODTHIRST, TOKENS.WHIRLWIND, TOKENS.EXECUTE }
-            or { TOKENS.BLOODTHIRST, TOKENS.WHIRLWIND, TOKENS.EXECUTE }
-    end
-
     local ordered = {}
-    for _, token in ipairs(orderedTokens) do
+    for _, token in ipairs(BuildOrderedDpsPremiumTokens(context)) do
         local eval = GetPassedEvalByToken(nextEvaluations, token)
         if eval then
             table.insert(ordered, eval)
@@ -4969,6 +5186,7 @@ local function BuildDpsRankedRecommendations(context, nextEvaluations, dumpEvalu
     local hamEval = GetPassedEvalByToken(nextEvaluations, TOKENS.HAMSTRING)
     local premiumEvals = BuildOrderedDpsPremiumEvals(context, nextEvaluations)
     local premiumEval = premiumEvals[1]
+    local readySoonPremiumEval = (not premiumEval) and FindReadySoonDpsPremiumEval(context, nextEvaluations) or nil
 
     if not context.inCombat then
         if shoutEval then
@@ -4977,14 +5195,22 @@ local function BuildDpsRankedRecommendations(context, nextEvaluations, dumpEvalu
         return ranked
     end
 
-    if bloodrageEval and not premiumEval and (context.rage or 0) < 30 and not IsPlannerBloodrageRedundant(context) then
+    if bloodrageEval and not premiumEval and not readySoonPremiumEval
+        and (context.rage or 0) < 30 and not IsPlannerBloodrageRedundant(context) then
         AppendRecommendedEntry(ranked, seen, BuildRecommendedEntry(context, TOKENS.BLOODRAGE, bloodrageEval, "offgcd"))
-    end
-    if ShouldRecommendDpsDump(context, bestDumpEval, premiumEval) then
-        AppendRecommendedEntry(ranked, seen, BuildRecommendedEntry(context, bestDumpToken, bestDumpEval, "dump", bestDumpReason))
     end
     for _, eval in ipairs(premiumEvals) do
         AppendRecommendedEntry(ranked, seen, BuildRecommendedEntry(context, eval.token, eval, "gcd"))
+    end
+    if readySoonPremiumEval then
+        AppendRecommendedEntry(
+            ranked,
+            seen,
+            BuildProjectedRecommendedEntry(context, readySoonPremiumEval, "主技能即将转好，主提示提前预留")
+        )
+    end
+    if ShouldRecommendDpsDump(context, bestDumpEval, premiumEval, readySoonPremiumEval) then
+        AppendRecommendedEntry(ranked, seen, BuildRecommendedEntry(context, bestDumpToken, bestDumpEval, "dump", bestDumpReason))
     end
     if bloodrageEval and (context.rage or 0) < 30 and not IsPlannerBloodrageRedundant(context) then
         AppendRecommendedEntry(ranked, seen, BuildRecommendedEntry(context, TOKENS.BLOODRAGE, bloodrageEval, "offgcd"))
@@ -5166,6 +5392,66 @@ function Decision.GetRecommendation()
     end
 
     MaybePrintOverpowerDebug(context, recommendedAction, rankedRecommendations)
+    do
+        if (ns.IsMetricsPanelShown and ns.IsMetricsPanelShown())
+            and context
+            and context.mode == "DPS"
+            and context.targetExists then
+            local btEval = FindEvalByToken(nextEvaluations, TOKENS.BLOODTHIRST)
+            local btCooldown = GetTokenCooldownRemaining(TOKENS.BLOODTHIRST, context)
+            local projectedWindow = GetDpsProjectedPremiumWindow(context, TOKENS.BLOODTHIRST)
+            local readySoonEval = FindReadySoonDpsPremiumEval(context, nextEvaluations)
+            local queuedDumpToken = context.queue and context.queue.queuedDumpToken or TOKENS.HOLD
+            if btEval
+                or btCooldown <= math.max(projectedWindow + 0.15, 1.25)
+                or (queuedDumpToken and queuedDumpToken ~= TOKENS.HOLD)
+                or (context.known and context.known.bloodthirst == false) then
+                local btReason = (btEval and btEval.reasons and btEval.reasons[1]) or "-"
+                local recommendedToken = recommendedAction and recommendedAction.token or TOKENS.NONE
+                local ranked1 = rankedRecommendations and rankedRecommendations[1] and rankedRecommendations[1].token or TOKENS.NONE
+                local ranked2 = rankedRecommendations and rankedRecommendations[2] and rankedRecommendations[2].token or TOKENS.NONE
+                local ranked3 = rankedRecommendations and rankedRecommendations[3] and rankedRecommendations[3].token or TOKENS.NONE
+                local signature = table.concat({
+                    "bt",
+                    tostring(recommendedToken),
+                    tostring(ranked1),
+                    tostring(ranked2),
+                    tostring(ranked3),
+                    tostring(queuedDumpToken),
+                    tostring(btEval and btEval.passed and true or false),
+                    tostring(context.known and context.known.bloodthirst or "nil"),
+                    tostring(readySoonEval and readySoonEval.token or TOKENS.NONE),
+                    string.format("%.2f", tonumber(btCooldown) or 0),
+                    string.format("%.2f", tonumber(projectedWindow) or 0),
+                    tostring((context.rage or 0) >= GetTokenRageCost(TOKENS.BLOODTHIRST)),
+                    tostring(btReason),
+                }, "|")
+                local now = GetTime()
+                if OverpowerDebugState.btSignature ~= signature or (now - (OverpowerDebugState.btAt or 0)) >= 0.75 then
+                    OverpowerDebugState.btSignature = signature
+                    OverpowerDebugState.btAt = now
+                    if ns.Print then
+                        ns.Print(string.format(
+                            "BT debug rec=%s ranked=%s/%s/%s queued=%s known=%s btPassed=%s readySoon=%s btCd=%.2f win=%.2f rage=%d/%d reason=%s",
+                            tostring(recommendedToken),
+                            tostring(ranked1),
+                            tostring(ranked2),
+                            tostring(ranked3),
+                            tostring(queuedDumpToken or TOKENS.HOLD),
+                            (context.known and context.known.bloodthirst == false) and "N" or "Y",
+                            btEval and btEval.passed and "Y" or "N",
+                            tostring(readySoonEval and readySoonEval.token or TOKENS.NONE),
+                            tonumber(btCooldown) or 0,
+                            tonumber(projectedWindow) or 0,
+                            tonumber(context.rage or 0) or 0,
+                            GetTokenRageCost(TOKENS.BLOODTHIRST),
+                            tostring(btReason)
+                        ))
+                    end
+                end
+            end
+        end
+    end
 
     return {
         mode = context.mode,
@@ -5219,6 +5505,8 @@ function DecisionModule:Init()
     frame:RegisterEvent("PLAYER_ENTERING_WORLD")
     frame:RegisterEvent("PLAYER_LEVEL_UP")
     frame:RegisterEvent("SPELLS_CHANGED")
+    frame:RegisterEvent("LEARNED_SPELL_IN_TAB")
+    frame:RegisterEvent("CHARACTER_POINTS_CHANGED")
     frame:RegisterEvent("PLAYER_EQUIPMENT_CHANGED")
     frame:RegisterEvent("GROUP_ROSTER_UPDATE")
     frame:RegisterEvent("PARTY_MEMBERS_CHANGED")
@@ -5229,11 +5517,16 @@ function DecisionModule:Init()
             InvalidateExecuteModelCache()
             InvalidateEquipmentStateCache()
             InvalidateBattleShoutAuraCache()
+            Decision._spellTokenCache = nil
             ResetHabitState(nil, UnitAffectingCombat("player"))
             return
         end
-        if event == "PLAYER_LEVEL_UP" or event == "SPELLS_CHANGED" then
+        if event == "PLAYER_LEVEL_UP"
+            or event == "SPELLS_CHANGED"
+            or event == "LEARNED_SPELL_IN_TAB"
+            or event == "CHARACTER_POINTS_CHANGED" then
             InvalidateExecuteModelCache()
+            Decision._spellTokenCache = nil
             return
         end
         if event == "PLAYER_EQUIPMENT_CHANGED" then
