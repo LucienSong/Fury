@@ -23,7 +23,8 @@ local transientPool = {}
 
 local StartPreviewTransfer
 
-local TIMELINE_MARKER_LIMIT = 10
+local TIMELINE_MARKER_BOOTSTRAP = 12
+local TIMELINE_EVENT_HARD_CAP = 48
 local SLOT_MOVE_DURATION = 0.18
 local TRANSIENT_MOVE_DURATION = 0.24
 local DISMISS_MOVE_DURATION = 0.18
@@ -144,6 +145,21 @@ local function GetMetricsDb()
     return ns.db and ns.db.metrics or nil
 end
 
+local function RefreshHudMouseInteraction()
+    if not iconFrame then
+        return
+    end
+    local editable = (ns.IsDecisionIconEditMode and ns.IsDecisionIconEditMode() or false)
+        and (ns.IsDecisionIconShown and ns.IsDecisionIconShown() or false)
+    iconFrame:EnableMouse(editable)
+    if iconFrame.SetMouseClickEnabled then
+        iconFrame:SetMouseClickEnabled(editable)
+    end
+    if iconFrame.SetMouseMotionEnabled then
+        iconFrame:SetMouseMotionEnabled(editable)
+    end
+end
+
 local function SaveFramePosition(targetFrame, key)
     local metricsDb = GetMetricsDb()
     if not targetFrame or not metricsDb then
@@ -186,6 +202,7 @@ function ns.SetDecisionIconShown(show)
     if timelinePanel then
         timelinePanel:SetShown(metricsDb.showIcon)
     end
+    RefreshHudMouseInteraction()
     if ns.RefreshDecisionIcon then
         ns.RefreshDecisionIcon()
     end
@@ -220,20 +237,21 @@ function ns.IsDecisionIconTextShown()
     return metricsDb and metricsDb.iconShowText
 end
 
-function ns.SetDecisionIconLocked(locked)
+function ns.SetDecisionIconEditMode(enabled)
     local metricsDb = GetMetricsDb()
     if not metricsDb then
         return
     end
-    metricsDb.iconLocked = locked and true or false
+    metricsDb.iconEditMode = enabled and true or false
+    RefreshHudMouseInteraction()
     if ns.RefreshDecisionIcon then
         ns.RefreshDecisionIcon()
     end
 end
 
-function ns.IsDecisionIconLocked()
+function ns.IsDecisionIconEditMode()
     local metricsDb = GetMetricsDb()
-    return metricsDb and metricsDb.iconLocked
+    return metricsDb and metricsDb.iconEditMode
 end
 
 function ns.GetDecisionIconSizePreset()
@@ -430,6 +448,16 @@ local function CreateTimelineMarker(parent)
     marker.kindText:Hide()
 
     return marker
+end
+
+local function EnsureTimelineMarker(index)
+    if not timelinePanel then
+        return nil
+    end
+    if not timelineMarkers[index] then
+        timelineMarkers[index] = CreateTimelineMarker(timelinePanel)
+    end
+    return timelineMarkers[index]
 end
 
 local function CreateTransientVisual(parent)
@@ -638,7 +666,7 @@ local function PushTimelineEvent(kind, token, pending, extra)
         deferUntil = extra.deferUntil,
     }
     table.insert(timelineEvents, 1, event)
-    while #timelineEvents > TIMELINE_MARKER_LIMIT do
+    while #timelineEvents > TIMELINE_EVENT_HARD_CAP do
         table.remove(timelineEvents)
     end
     return event
@@ -736,8 +764,9 @@ local function RefreshTimelineVisual()
 
     local anyShown = false
     local now = GetTime()
-    for i = 1, TIMELINE_MARKER_LIMIT do
-        local marker = timelineMarkers[i]
+    local markerCount = math.max(#timelineEvents, #timelineMarkers)
+    for i = 1, markerCount do
+        local marker = EnsureTimelineMarker(i)
         local event = timelineEvents[i]
         if not event then
             marker:Hide()
@@ -1111,14 +1140,14 @@ local function Render()
     timelinePanel:SetAlpha(1)
 
     local backdropColor = rec.mode == "TPS_SURVIVAL" and { 0.1, 0.2, 0.35, 0.9 } or { 0.35, 0.22, 0.06, 0.9 }
-    local hideBackdrop = ns.IsDecisionIconLocked and ns.IsDecisionIconLocked()
+    local showBackdrop = ns.IsDecisionIconEditMode and ns.IsDecisionIconEditMode()
     if iconFrame.SetBackdropColor then
-        iconFrame:SetBackdropColor(backdropColor[1], backdropColor[2], backdropColor[3], hideBackdrop and 0 or backdropColor[4])
+        iconFrame:SetBackdropColor(backdropColor[1], backdropColor[2], backdropColor[3], showBackdrop and backdropColor[4] or 0)
     end
     if iconFrame.SetBackdropBorderColor then
-        iconFrame:SetBackdropBorderColor(1, 1, 1, hideBackdrop and 0 or 0.6)
+        iconFrame:SetBackdropBorderColor(1, 1, 1, showBackdrop and 0.6 or 0)
     end
-    timelinePanel.bar:SetAlpha(hideBackdrop and 0.18 or 1)
+    timelinePanel.bar:SetAlpha(0)
 end
 
 function ns.RefreshDecisionIcon()
@@ -1161,9 +1190,9 @@ local function BuildTimelinePanel()
     timelinePanel:EnableMouse(false)
 
     timelinePanel.bar = timelinePanel:CreateTexture(nil, "BACKGROUND")
-    timelinePanel.bar:SetColorTexture(0.08, 0.08, 0.08, 0.78)
+    timelinePanel.bar:SetColorTexture(0.08, 0.08, 0.08, 0)
 
-    for i = 1, TIMELINE_MARKER_LIMIT do
+    for i = 1, TIMELINE_MARKER_BOOTSTRAP do
         timelineMarkers[i] = CreateTimelineMarker(timelinePanel)
     end
 end
@@ -1172,12 +1201,12 @@ local function BuildIconFrame()
     local template = BackdropTemplateMixin and "BackdropTemplate" or nil
     iconFrame = CreateFrame("Frame", "FuryDecisionHintIcon", UIParent, template)
     iconFrame:SetFrameStrata("HIGH")
-    iconFrame:EnableMouse(true)
+    iconFrame:EnableMouse(false)
     iconFrame:SetMovable(true)
     iconFrame:RegisterForDrag("LeftButton")
     iconFrame:SetClampedToScreen(true)
     iconFrame:SetScript("OnDragStart", function(self)
-        if ns.IsDecisionIconLocked and ns.IsDecisionIconLocked() then
+        if not (ns.IsDecisionIconEditMode and ns.IsDecisionIconEditMode()) then
             return
         end
         self:StartMoving()
@@ -1234,6 +1263,7 @@ function IconModule:Init()
     BuildTimelinePanel()
     RestoreFramePosition(iconFrame, "iconPoint", 260, 0)
     iconFrame:SetShown(ns.IsDecisionIconShown() and true or false)
+    RefreshHudMouseInteraction()
     ns.RefreshDecisionIcon()
 end
 

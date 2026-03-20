@@ -1,13 +1,29 @@
 local ADDON_NAME, ns = ...
-local VERSION = "2.3"
+local VERSION = "2.4"
 
 ns.name = ADDON_NAME
 ns.modules = {}
 ns.addon = CreateFrame("Frame")
 
-local CHANGELOG_ORDER = { "2.3", "2.2", "2.1", "2.0", "1.10", "1.9", "1.8", "1.7", "1.6", "1.5", "1.4", "1.3", "1.2", "1.1", "1.0" }
+local CHANGELOG_ORDER = { "2.4", "2.3", "2.2", "2.1", "2.0", "1.10", "1.9", "1.8", "1.7", "1.6", "1.5", "1.4", "1.3", "1.2", "1.1", "1.0" }
 
 local CHANGELOG = {
+    ["2.4"] = {
+        date = "2026-03-20",
+        sections = {
+            ["新增"] = {
+                "HUD 新增独立编辑模式，开启后可拖拽位置，关闭后恢复点击穿透。",
+            },
+            ["优化"] = {
+                "HUD 交互入口收敛为单一编辑模式，移除了多余的锁定开关与对应命令说明。",
+                "时间线 marker 改为按需扩容并提高事件上限，避免高频施放时旧图标在时间窗内被提前挤掉。",
+            },
+            ["修复"] = {
+                "修复 HUD 透明区域仍会拦截鼠标点击的问题。",
+                "修复非编辑模式下背景板仍可见的问题，现在仅在编辑模式显示背景与边框。",
+            },
+        },
+    },
     ["2.3"] = {
         date = "2026-03-20",
         sections = {
@@ -249,7 +265,7 @@ local defaults = {
         showIcon = true,
         iconShowOutOfCombat = true,
         iconShowText = false,
-        iconLocked = false,
+        iconEditMode = false,
         iconSizePreset = "standard",
         iconBaseSize = 52,
         timelineWidth = 220,

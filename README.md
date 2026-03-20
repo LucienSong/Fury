@@ -2,10 +2,10 @@
 
 作者：`Lucien`  
 WoW Classic Hardcore Realm & ID：`@硬汉-健将`  
-当前版本：`2.3`
+当前版本：`2.4`
 项目地址：`https://github.com/LucienSong/Fury`
 
-Fury 2.3 是一个面向 WoW Classic Era 的狂暴战决策辅助插件，目标是在实战中帮助你用更稳定、更可解释的优先级树逼近 DPS / TPS 最优操作。
+Fury 2.4 是一个面向 WoW Classic Era 的狂暴战决策辅助插件，目标是在实战中帮助你用更稳定、更可解释的优先级树逼近 DPS / TPS 最优操作。
 
 ## 核心功能
 
@@ -48,7 +48,7 @@ Fury 2.3 是一个面向 WoW Classic Era 的狂暴战决策辅助插件，目标
 | 决策模式 | `/fury mode tps` | 强制使用 TPS/生存导向 |
 | 图标总开关 | `/fury icon on` / `/fury icon off` | 开启/关闭决策提示图标 |
 | 图标文字 | `/fury icon text on` / `off` | 开启/关闭图标文字 |
-| 图标锁定 | `/fury icon lock on` / `off` | 锁定/解锁图标拖拽 |
+| 图标编辑 | `/fury icon edit on` / `off` | 开启/关闭 HUD 编辑拖拽模式 |
 | 图标尺寸 | `/fury icon size compact\|standard\|large` | 切换图标尺寸档位 |
 | 习惯提示 | `/fury habit on` / `off` | 开启/关闭连按习惯提示 |
 | 参数回退 | `/fury profile reset` | 清空自定义覆盖，恢复调优基线 |
@@ -58,7 +58,7 @@ Fury 2.3 是一个面向 WoW Classic Era 的狂暴战决策辅助插件，目标
 ## 设置页结构
 
 - `介绍`：作者信息、插件定位、功能概览
-- `图标`：小地图图标、图标文字、锁定、主图标大小、时间线宽度与长度
+- `图标`：小地图图标、图标文字、编辑模式、主图标大小、时间线宽度与长度
 - `决策`：Debug 面板开关、预测窗口
 - `破甲`：HP 阈值、刷新秒数、目标层数
 - `参数`：恢复统一调优基线

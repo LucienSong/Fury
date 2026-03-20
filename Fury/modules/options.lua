@@ -19,7 +19,7 @@ local changelogScrollChild
 local minimapCheck
 local decisionIconCheck
 local iconTextCheck
-local iconLockCheck
+local iconEditCheck
 local hamstringExecuteCheck
 local iconSizeLabel
 local timelineWidthLabel
@@ -156,8 +156,8 @@ local function RefreshOptionsState()
     if iconTextCheck and ns.IsDecisionIconTextShown then
         iconTextCheck:SetChecked(ns.IsDecisionIconTextShown())
     end
-    if iconLockCheck and ns.IsDecisionIconLocked then
-        iconLockCheck:SetChecked(ns.IsDecisionIconLocked())
+    if iconEditCheck and ns.IsDecisionIconEditMode then
+        iconEditCheck:SetChecked(ns.IsDecisionIconEditMode())
     end
     if hamstringExecuteCheck and ns.IsHamstringExecutePhaseEnabled then
         hamstringExecuteCheck:SetChecked(ns.IsHamstringExecutePhaseEnabled())
@@ -267,7 +267,7 @@ local function BuildAboutPage(parent)
         "Classic Hardcore Realm & ID: @硬汉-健将",
         "GitHub: https://github.com/LucienSong/Fury",
         "",
-        "Fury 2.2 是 WoW Classic Era 狂暴战决策辅助插件，核心目标是提升实战循环稳定性，",
+        "Fury 2.4 是 WoW Classic Era 狂暴战决策辅助插件，核心目标是提升实战循环稳定性，",
         "在 DPS/TPS 场景下给出更硬、更可解释的下一技能建议。",
         "",
         "功能简介：",
@@ -306,17 +306,18 @@ local function BuildIconPage(parent)
         end
     end)
 
-    iconLockCheck = CreateFrame("CheckButton", "FuryOptionsIconLockCheck", page, "InterfaceOptionsCheckButtonTemplate")
-    iconLockCheck:SetPoint("TOPLEFT", iconTextCheck, "BOTTOMLEFT", 0, -8)
-    _G[iconLockCheck:GetName() .. "Text"]:SetText("锁定主提示图标位置")
-    iconLockCheck:SetScript("OnClick", function(self)
-        if ns.SetDecisionIconLocked then
-            ns.SetDecisionIconLocked(self:GetChecked())
+    iconEditCheck = CreateFrame("CheckButton", "FuryOptionsIconEditCheck", page, "InterfaceOptionsCheckButtonTemplate")
+    iconEditCheck:SetPoint("TOPLEFT", iconTextCheck, "BOTTOMLEFT", 0, -8)
+    _G[iconEditCheck:GetName() .. "Text"]:SetText("编辑模式（可拖拽 HUD）")
+    iconEditCheck:SetScript("OnClick", function(self)
+        if ns.SetDecisionIconEditMode then
+            ns.SetDecisionIconEditMode(self:GetChecked())
+            RefreshOptionsState()
         end
     end)
 
     iconSizeLabel = page:CreateFontString(nil, "ARTWORK", "GameFontNormal")
-    iconSizeLabel:SetPoint("TOPLEFT", iconLockCheck, "BOTTOMLEFT", 0, -12)
+    iconSizeLabel:SetPoint("TOPLEFT", iconEditCheck, "BOTTOMLEFT", 0, -12)
     iconSizeLabel:SetText("")
 
     local iconSizeMinusButton = CreateFrame("Button", "FuryOptionsIconSizeMinus", page, "UIPanelButtonTemplate")

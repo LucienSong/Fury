@@ -29,10 +29,10 @@ function SlashModule:Init()
                 ns.SetDecisionIconTextShown(true)
             elseif rest == "text off" and ns.SetDecisionIconTextShown then
                 ns.SetDecisionIconTextShown(false)
-            elseif rest == "lock on" and ns.SetDecisionIconLocked then
-                ns.SetDecisionIconLocked(true)
-            elseif rest == "lock off" and ns.SetDecisionIconLocked then
-                ns.SetDecisionIconLocked(false)
+            elseif rest == "edit on" and ns.SetDecisionIconEditMode then
+                ns.SetDecisionIconEditMode(true)
+            elseif rest == "edit off" and ns.SetDecisionIconEditMode then
+                ns.SetDecisionIconEditMode(false)
             elseif rest:match("^size%s+") and ns.SetDecisionIconSizePreset then
                 local preset = rest:gsub("^size%s+", "")
                 ns.SetDecisionIconSizePreset(preset)
@@ -40,9 +40,14 @@ function SlashModule:Init()
                 ns.ToggleDecisionIcon()
             end
             local textFlag = ns.IsDecisionIconTextShown and ns.IsDecisionIconTextShown() and "开" or "关"
-            local lockFlag = ns.IsDecisionIconLocked and ns.IsDecisionIconLocked() and "开" or "关"
+            local editFlag = ns.IsDecisionIconEditMode and ns.IsDecisionIconEditMode() and "开" or "关"
             local sizeLabel = ns.GetDecisionIconSizePresetLabel and ns.GetDecisionIconSizePresetLabel() or "标准"
-            ns.Print("图标: " .. (ns.IsDecisionIconShown() and "开启" or "关闭") .. "，文字: " .. textFlag .. "，锁定: " .. lockFlag .. "，尺寸: " .. sizeLabel)
+            ns.Print(
+                "图标: " .. (ns.IsDecisionIconShown() and "开启" or "关闭")
+                    .. "，文字: " .. textFlag
+                    .. "，编辑: " .. editFlag
+                    .. "，尺寸: " .. sizeLabel
+            )
         elseif cmd == "horizon" then
             local ms = tonumber(rest)
             if not ms then
@@ -121,7 +126,7 @@ function SlashModule:Init()
                 ns.Print("命令: /fury profile reset")
             end
         else
-            ns.Print("命令: /fury, /fury options, /fury minimap, /fury metrics, /fury icon [on/off|text on/off|lock on/off|size compact|size standard|size large], /fury horizon 400, /fury mode auto|dps|tps, /fury habit on|off, /fury changelog [version], /fury profile [reset]")
+            ns.Print("命令: /fury, /fury options, /fury minimap, /fury metrics, /fury icon [on/off|text on/off|edit on/off|size compact|size standard|size large], /fury horizon 400, /fury mode auto|dps|tps, /fury habit on|off, /fury changelog [version], /fury profile [reset]")
         end
     end
 end
