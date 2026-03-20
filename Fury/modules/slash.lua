@@ -121,7 +121,7 @@ function SlashModule:Init()
                 ns.Print("命令: /fury profile reset")
             end
         else
-            ns.Print("命令: /fury, /fury options, /fury minimap, /fury metrics, /fury icon [on/off|text on/off|ooc on/off|lock on/off|size compact|size standard|size large], /fury horizon 400, /fury mode auto|dps|tps, /fury habit on|off, /fury changelog [version], /fury profile [reset]")
+            ns.Print("命令: /fury, /fury options, /fury minimap, /fury metrics, /fury icon [on/off|text on/off|lock on/off|size compact|size standard|size large], /fury horizon 400, /fury mode auto|dps|tps, /fury habit on|off, /fury changelog [version], /fury profile [reset]")
         end
     end
 end
