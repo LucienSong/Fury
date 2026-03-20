@@ -5,12 +5,29 @@ local CollectorModule = {
 }
 
 local BATTLE_STANCE_ID = 2457
+local OVERPOWER_TRIGGER_TOKENS = {
+    BLOODTHIRST = true,
+    WHIRLWIND = true,
+    EXECUTE = true,
+    OVERPOWER = true,
+    SUNDER_ARMOR = true,
+    HEROIC_STRIKE = true,
+    CLEAVE = true,
+    HAMSTRING = true,
+    REVENGE = true,
+    SHIELD_SLAM = true,
+    MOCKING_BLOW = true,
+}
 
 local function IsBattleStanceActive()
-    if IsCurrentSpell and IsCurrentSpell(BATTLE_STANCE_ID) then
-        return true
-    end
     local forms = GetNumShapeshiftForms and (GetNumShapeshiftForms() or 0) or 0
+    local activeForm = GetShapeshiftForm and (GetShapeshiftForm() or 0) or 0
+    if activeForm and activeForm > 0 and activeForm <= forms then
+        local _, _, active, _, spellId = GetShapeshiftFormInfo(activeForm)
+        if active and spellId == BATTLE_STANCE_ID then
+            return true
+        end
+    end
     for i = 1, forms do
         local _, _, active, _, spellId = GetShapeshiftFormInfo(i)
         if active and spellId == BATTLE_STANCE_ID then
@@ -33,6 +50,18 @@ local function EnsureFightStarted()
         return metrics.StartFight(UnitGUID("target"))
     end
     return nil
+end
+
+local function IsOverpowerTriggerSpell(spellId, spellName)
+    local decision = ns.decision
+    if not decision then
+        return false
+    end
+    local token = decision.GetTokenForSpellId and spellId and decision.GetTokenForSpellId(spellId) or nil
+    if (not token) and decision.GetTokenForSpellName and spellName then
+        token = decision.GetTokenForSpellName(spellName)
+    end
+    return token and OVERPOWER_TRIGGER_TOKENS[token] or false
 end
 
 local function HandleCombatLog()
@@ -91,7 +120,7 @@ local function HandleCombatLog()
     if subEvent == "SPELL_MISSED" and sourceGUID == playerGUID then
         local missType = data[15]
         metrics.RecordSpellMiss(missType)
-        if missType == "DODGE" and destGUID and IsBattleStanceActive() then
+        if missType == "DODGE" and destGUID and IsBattleStanceActive() and IsOverpowerTriggerSpell(spellId, spellName) then
             metrics.RecordTargetDodged(destGUID, GetTime())
         end
         metrics.MarkHostile(destGUID, GetTime())

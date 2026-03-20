@@ -1,13 +1,30 @@
 local ADDON_NAME, ns = ...
-local VERSION = "2.4"
+local VERSION = "2.5"
 
 ns.name = ADDON_NAME
 ns.modules = {}
 ns.addon = CreateFrame("Frame")
 
-local CHANGELOG_ORDER = { "2.4", "2.3", "2.2", "2.1", "2.0", "1.10", "1.9", "1.8", "1.7", "1.6", "1.5", "1.4", "1.3", "1.2", "1.1", "1.0" }
+local CHANGELOG_ORDER = { "2.5", "2.4", "2.3", "2.2", "2.1", "2.0", "1.10", "1.9", "1.8", "1.7", "1.6", "1.5", "1.4", "1.3", "1.2", "1.1", "1.0" }
 
 local CHANGELOG = {
+    ["2.5"] = {
+        date = "2026-03-21",
+        sections = {
+            ["新增"] = {
+                "Debug 面板打开时，Overpower 异常推荐会同步打印到聊天，便于现场定位姿态与窗口状态。",
+            },
+            ["优化"] = {
+                "Debug 面板的展示字段收敛为真实展示来源与展示 GCD，不再混用旧兼容口径。",
+                "GCD、天赋点数与玩家 Aura 读取补充 Classic Era 兼容回退，减少客户端返回差异带来的假死数据。",
+            },
+            ["修复"] = {
+                "修复 Overpower 会从 wait prediction / ready-soon lock 兼容路径错误漏到 HUD 主提示的问题。",
+                "修复主提示区仍可能从旧 displayNextSkill 回退路径残留旧技能的问题。",
+                "修复 Death Wish 在部分客户端落入 debuff 栏时 Debug 面板 Buff 状态无法识别的问题。",
+            },
+        },
+    },
     ["2.4"] = {
         date = "2026-03-20",
         sections = {

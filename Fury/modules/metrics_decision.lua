@@ -15,6 +15,10 @@ local HabitState = {
     mode = nil,
     inCombat = nil,
 }
+local OverpowerDebugState = {
+    signature = nil,
+    at = 0,
+}
 
 local TOKENS = {
     NONE = "NONE",
@@ -49,6 +53,7 @@ local ReadThreatState
 local ReadSunderState
 local IsOffGcdToken
 local FindEvalByToken
+local ExtractAuraSpellId
 
 local SPELL_ID = {
     BATTLE_STANCE = 2457,
@@ -75,6 +80,15 @@ local HS_RANK_IDS = { 78, 284, 285, 1608, 11564, 11565, 11566, 11567, 25286 }
 local CLEAVE_RANK_IDS = { 845, 7369, 11608, 11609, 20569 }
 local BATTLE_SHOUT_RANK_IDS = { 6673, 5242, 6192, 11549, 11550, 11551, 25289 }
 local MOCKING_BLOW_RANK_IDS = { 694, 7400, 7402, 20559, 20560 }
+local GCD_FALLBACK_SPELL_IDS = {
+    SPELL_ID.SUNDER_ARMOR,
+    SPELL_ID.BATTLE_SHOUT,
+    SPELL_ID.HAMSTRING,
+    SPELL_ID.OVERPOWER,
+    6572, -- Revenge
+    2565, -- Shield Block
+    23922, -- Shield Slam
+}
 local EXECUTE_MODEL_CACHE = nil
 local EXECUTE_MODEL_CACHE_AT = 0
 local EXECUTE_MODEL_CACHE_TTL = 15
@@ -715,14 +729,29 @@ end
 
 local function GetGcdRemaining()
     local start, duration = GetSpellCooldown(61304)
-    if not start or start == 0 then
-        return 0
+    if start and start > 0 then
+        local remain = start + (duration or 0) - GetTime()
+        if remain > 0 then
+            return remain
+        end
     end
-    local remain = start + (duration or 0) - GetTime()
-    if remain < 0 then
-        return 0
+
+    -- Classic Era 下 61304 并不总是可靠，回退到无固有 CD 的主 GCD 技能探针。
+    local best = nil
+    for i = 1, #GCD_FALLBACK_SPELL_IDS do
+        local spellId = GCD_FALLBACK_SPELL_IDS[i]
+        local spellName = spellId and GetSpellInfo(spellId) or nil
+        if spellName then
+            local probeStart, probeDuration = GetSpellCooldown(spellName)
+            if probeStart and probeStart > 0 and probeDuration and probeDuration > 0 and probeDuration <= 2.0 then
+                local probeRemain = probeStart + probeDuration - GetTime()
+                if probeRemain > 0 and ((not best) or probeRemain < best) then
+                    best = probeRemain
+                end
+            end
+        end
     end
-    return remain
+    return best or 0
 end
 
 local function MatchStanceBySpellId(spellId)
@@ -754,33 +783,28 @@ local function MatchStanceByIcon(texture)
 end
 
 local function GetStance()
-    -- 0) 直接用 spellId 判断当前姿态（跨语言最稳定）。
-    if IsCurrentSpell and IsCurrentSpell(SPELL_ID.DEFENSIVE_STANCE) then
-        return "Defensive", "current-spell:71"
-    end
-    if IsCurrentSpell and IsCurrentSpell(SPELL_ID.BERSERKER_STANCE) then
-        return "Berserker", "current-spell:2458"
-    end
-    if IsCurrentSpell and IsCurrentSpell(SPELL_ID.BATTLE_STANCE) then
-        return "Battle", "current-spell:2457"
-    end
-
-    -- 1) 优先按 spellId 扫描玩家 Buff（规避多语言差异）。
-    for i = 1, 40 do
-        local name, _, _, _, _, _, _, _, _, auraSpellId = UnitBuff("player", i)
-        if not name then
-            break
-        end
-        local byId = MatchStanceBySpellId(auraSpellId)
-        if byId then
-            return byId, "buff-id:" .. tostring(auraSpellId)
-        end
-    end
-
     local activeForm = GetShapeshiftForm and GetShapeshiftForm() or 0
     local forms = GetNumShapeshiftForms() or 0
 
-    -- 2) 逐个扫描姿态栏，优先 active，然后按 spellId/icon/name。
+    -- 0) 优先读取当前 active form。对战士姿态来说，这比 IsCurrentSpell/Buff 更接近真值。
+    if activeForm and activeForm > 0 and activeForm <= forms then
+        local icon, name, active, _, spellId = GetShapeshiftFormInfo(activeForm)
+        local guessed = MatchStanceBySpellId(spellId) or MatchStanceByIcon(icon)
+        if not guessed then
+            if name == SPELL.DEFENSIVE_STANCE then
+                guessed = "Defensive"
+            elseif name == SPELL.BERSERKER_STANCE then
+                guessed = "Berserker"
+            elseif name == SPELL.BATTLE_STANCE then
+                guessed = "Battle"
+            end
+        end
+        if active and guessed then
+            return guessed, "form-index-active:" .. tostring(activeForm)
+        end
+    end
+
+    -- 1) 逐个扫描姿态栏，优先 active，然后按 spellId/icon/name。
     for i = 1, forms do
         local icon, name, active, _, spellId = GetShapeshiftFormInfo(i)
         local byId = MatchStanceBySpellId(spellId)
@@ -799,21 +823,27 @@ local function GetStance()
         end
     end
 
-    -- 3) 按当前 form index 读取条目并匹配（有些环境 active 不可靠）。
-    if activeForm and activeForm > 0 and activeForm <= forms then
-        local icon, name, _, _, spellId = GetShapeshiftFormInfo(activeForm)
-        local guessed = MatchStanceBySpellId(spellId) or MatchStanceByIcon(icon)
-        if not guessed then
-            if name == SPELL.DEFENSIVE_STANCE then
-                guessed = "Defensive"
-            elseif name == SPELL.BERSERKER_STANCE then
-                guessed = "Berserker"
-            elseif name == SPELL.BATTLE_STANCE then
-                guessed = "Battle"
-            end
+    -- 2) 再用 spellId 判断当前姿态。
+    if IsCurrentSpell and IsCurrentSpell(SPELL_ID.DEFENSIVE_STANCE) then
+        return "Defensive", "current-spell:71"
+    end
+    if IsCurrentSpell and IsCurrentSpell(SPELL_ID.BERSERKER_STANCE) then
+        return "Berserker", "current-spell:2458"
+    end
+    if IsCurrentSpell and IsCurrentSpell(SPELL_ID.BATTLE_STANCE) then
+        return "Battle", "current-spell:2457"
+    end
+
+    -- 3) 再按 spellId 扫描玩家 Buff（规避少数环境下姿态栏异常）。
+    for i = 1, 40 do
+        local name, _, _, _, _, _, _, _, _, v10, v11 = UnitBuff("player", i)
+        if not name then
+            break
         end
-        if guessed then
-            return guessed, "form-index:" .. tostring(activeForm)
+        local auraSpellId = ExtractAuraSpellId(nil, nil, v10, v11)
+        local byId = MatchStanceBySpellId(auraSpellId)
+        if byId then
+            return byId, "buff-id:" .. tostring(auraSpellId)
         end
     end
 
@@ -827,6 +857,74 @@ local function GetStance()
     end
 
     return "None", "unknown"
+end
+
+local function IsBattleStanceStrict()
+    local forms = GetNumShapeshiftForms and (GetNumShapeshiftForms() or 0) or 0
+    local activeForm = GetShapeshiftForm and (GetShapeshiftForm() or 0) or 0
+    if activeForm and activeForm > 0 and activeForm <= forms then
+        local _, _, active, _, spellId = GetShapeshiftFormInfo(activeForm)
+        return active and spellId == SPELL_ID.BATTLE_STANCE or false
+    end
+    for i = 1, forms do
+        local _, _, active, _, spellId = GetShapeshiftFormInfo(i)
+        if active and spellId == SPELL_ID.BATTLE_STANCE then
+            return true
+        end
+    end
+    return false
+end
+
+local function MaybePrintOverpowerDebug(context, recommendedAction, rankedRecommendations)
+    if not (ns.IsMetricsPanelShown and ns.IsMetricsPanelShown()) then
+        return
+    end
+    local recommendedToken = recommendedAction and recommendedAction.token or TOKENS.NONE
+    local rankedTop = rankedRecommendations and rankedRecommendations[1] and rankedRecommendations[1].token or TOKENS.NONE
+    local opState = context and context.overpowerState or nil
+    local opActive = opState and opState.active and true or false
+    if recommendedToken ~= TOKENS.OVERPOWER and rankedTop ~= TOKENS.OVERPOWER and not opActive then
+        return
+    end
+
+    local strictBattle = IsBattleStanceStrict()
+    local targetGuid = UnitGUID("target")
+    local opRemaining = opState and tonumber(opState.remaining) or 0
+    local targetMatch = opState and opState.targetGuid and targetGuid and opState.targetGuid == targetGuid or false
+    local signature = table.concat({
+        tostring(context and context.stance or "None"),
+        tostring(context and context.stanceSource or "unknown"),
+        tostring(strictBattle),
+        tostring(recommendedToken),
+        tostring(rankedTop),
+        tostring(opActive),
+        string.format("%.2f", opRemaining or 0),
+        tostring(targetMatch),
+        tostring(opState and opState.targetGuid or "nil"),
+        tostring(targetGuid or "nil"),
+    }, "|")
+    local now = GetTime()
+    if OverpowerDebugState.signature == signature and (now - (OverpowerDebugState.at or 0)) < 0.75 then
+        return
+    end
+    OverpowerDebugState.signature = signature
+    OverpowerDebugState.at = now
+
+    if ns.Print then
+        ns.Print(string.format(
+            "OP debug stance=%s source=%s strict=%s rec=%s top=%s active=%s remain=%.2f targetMatch=%s opTarget=%s target=%s",
+            tostring(context and context.stance or "None"),
+            tostring(context and context.stanceSource or "unknown"),
+            strictBattle and "Y" or "N",
+            tostring(recommendedToken),
+            tostring(rankedTop),
+            opActive and "Y" or "N",
+            opRemaining or 0,
+            targetMatch and "Y" or "N",
+            tostring(opState and opState.targetGuid or "nil"),
+            tostring(targetGuid or "nil")
+        ))
+    end
 end
 
 local function IsUsable(spellName)
@@ -1035,16 +1133,53 @@ local function GetTargetHealthPct()
     return (hp / maxHp) * 100
 end
 
-local function HasUnitBuffBySpellId(unit, spellId)
+ExtractAuraSpellId = function(v8, v9, v10, v11)
+    if type(v11) == "number" then
+        return v11
+    end
+    if type(v10) == "number" then
+        return v10
+    end
+    if type(v9) == "number" then
+        return v9
+    end
+    if type(v8) == "number" then
+        return v8
+    end
+    return nil
+end
+
+local function AuraMatchesSpell(name, rank, spellId, v8, v9, v10, v11)
+    local auraSpellId = ExtractAuraSpellId(v8, v9, v10, v11)
+    if auraSpellId == spellId then
+        return true
+    end
+    local expectedName = GetSpellInfo(spellId)
+    if expectedName and (name == expectedName or ((rank and rank ~= "") and (name .. "(" .. rank .. ")") == expectedName)) then
+        return true
+    end
+    return false
+end
+
+local function HasUnitAuraBySpellId(unit, spellId)
     if not unit or not spellId then
         return false
     end
     for i = 1, 40 do
-        local name, _, _, _, _, _, _, _, _, auraSpellId = UnitBuff(unit, i)
+        local name, rank, _, _, _, _, _, _, _, v10, v11 = UnitBuff(unit, i)
         if not name then
             break
         end
-        if auraSpellId == spellId then
+        if AuraMatchesSpell(name, rank, spellId, nil, nil, v10, v11) then
+            return true
+        end
+    end
+    for i = 1, 40 do
+        local name, rank, _, _, _, _, _, _, _, v10, v11 = UnitDebuff(unit, i)
+        if not name then
+            break
+        end
+        if AuraMatchesSpell(name, rank, spellId, nil, nil, v10, v11) then
             return true
         end
     end
@@ -1067,7 +1202,7 @@ local function GetUnitBuffInfoBySpellIds(unit, spellIdSet)
     end
     local now = GetTime()
     for i = 1, 40 do
-        local name, _, _, _, _, v6, v7, v8, v9, v10 = UnitBuff(unit, i)
+        local name, rank, _, _, _, v6, v7, v8, v9, v10, v11 = UnitBuff(unit, i)
         if not name then
             break
         end
@@ -1078,12 +1213,12 @@ local function GetUnitBuffInfoBySpellIds(unit, spellIdSet)
         if type(v6) == "number" and type(v7) == "number" then
             duration = v6 or 0
             expirationTime = v7 or 0
-            auraSpellId = v10
+            auraSpellId = ExtractAuraSpellId(nil, nil, v10, v11)
         elseif type(v6) == "number" and type(v7) == "string" then
             expirationTime = v6 or 0
-            auraSpellId = v10
+            auraSpellId = ExtractAuraSpellId(nil, nil, v10, v11)
         else
-            auraSpellId = v10 or v9 or v8
+            auraSpellId = ExtractAuraSpellId(v8, v9, v10, v11)
         end
         if auraSpellId and spellIdSet[auraSpellId] then
             local remaining = 0
@@ -1092,8 +1227,102 @@ local function GetUnitBuffInfoBySpellIds(unit, spellIdSet)
             end
             return true, remaining, duration or 0, auraSpellId
         end
+        for expectedSpellId in pairs(spellIdSet) do
+            local expectedName = GetSpellInfo(expectedSpellId)
+            if expectedName and (name == expectedName or ((rank and rank ~= "") and (name .. "(" .. rank .. ")") == expectedName)) then
+                local remaining = 0
+                if type(expirationTime) == "number" and expirationTime > 0 then
+                    remaining = math.max(expirationTime - now, 0)
+                end
+                return true, remaining, duration or 0, expectedSpellId
+            end
+        end
     end
     return false, 0, 0, nil
+end
+
+local function GetTalentTabPoints(tabIndex)
+    if not (tabIndex and GetTalentTabInfo) then
+        return 0
+    end
+    local argVariants = {
+        { tabIndex },
+        { tabIndex, false, false },
+        { tabIndex, false, false, 1 },
+        { tabIndex, nil, false },
+        { tabIndex, nil, false, 1 },
+    }
+    for i = 1, #argVariants do
+        local ok, _, _, points = pcall(GetTalentTabInfo, unpack(argVariants[i]))
+        if ok and type(points) == "number" and points >= 0 then
+            return points
+        end
+    end
+    return 0
+end
+
+local function GetTalentTabCount()
+    if not GetNumTalentTabs then
+        return 0
+    end
+    local argVariants = {
+        {},
+        { false, false },
+        { false, false, 1 },
+        { nil, false },
+        { nil, false, 1 },
+    }
+    for i = 1, #argVariants do
+        local ok, count = pcall(GetNumTalentTabs, unpack(argVariants[i]))
+        if ok and type(count) == "number" and count > 0 then
+            return count
+        end
+    end
+    return 0
+end
+
+local function SumTalentPointsByTab(tabIndex)
+    if not (tabIndex and GetNumTalents and GetTalentInfo) then
+        return 0
+    end
+    local talentCount = 0
+    local countVariants = {
+        { tabIndex },
+        { tabIndex, false, false },
+        { tabIndex, false, false, 1 },
+        { tabIndex, nil, false },
+        { tabIndex, nil, false, 1 },
+    }
+    for i = 1, #countVariants do
+        local ok, count = pcall(GetNumTalents, unpack(countVariants[i]))
+        if ok and type(count) == "number" and count > 0 then
+            talentCount = count
+            break
+        end
+    end
+    if talentCount <= 0 then
+        return 0
+    end
+    local total = 0
+    local infoVariants = {
+        {},
+        { false, false },
+        { false, false, 1 },
+        { nil, false },
+        { nil, false, 1 },
+    }
+    for talentIndex = 1, talentCount do
+        local currentRank = 0
+        for i = 1, #infoVariants do
+            local ok, _, _, _, _, rank = pcall(GetTalentInfo, tabIndex, talentIndex, unpack(infoVariants[i]))
+            if ok and type(rank) == "number" then
+                currentRank = rank
+                break
+            end
+        end
+        total = total + currentRank
+    end
+    return total
 end
 
 local function InvalidateExecuteModelCache()
@@ -1139,15 +1368,28 @@ local function ReadTalentState()
     }
 
     if GetNumTalentTabs and GetTalentTabInfo then
-        local tabs = GetNumTalentTabs() or 0
+        local tabs = GetTalentTabCount()
         for i = 1, tabs do
-            local _, _, points = GetTalentTabInfo(i)
+            local points = GetTalentTabPoints(i)
             if i == 1 then
                 state.armsPoints = points or 0
             elseif i == 2 then
                 state.furyPoints = points or 0
             elseif i == 3 then
                 state.protPoints = points or 0
+            end
+        end
+    end
+
+    if state.armsPoints == 0 and state.furyPoints == 0 and state.protPoints == 0 and GetNumTalents and GetTalentInfo then
+        for tabIndex = 1, 3 do
+            local spent = SumTalentPointsByTab(tabIndex)
+            if tabIndex == 1 then
+                state.armsPoints = spent
+            elseif tabIndex == 2 then
+                state.furyPoints = spent
+            elseif tabIndex == 3 then
+                state.protPoints = spent
             end
         end
     end
@@ -1247,11 +1489,11 @@ local function ReadTrinketState()
 end
 
 local function ReadBuffState()
-    local flurry = HasUnitBuffBySpellId("player", SPELL_ID.FLURRY_BUFF)
-    local deathWish = HasUnitBuffBySpellId("player", SPELL_ID.DEATH_WISH_BUFF)
-    local reck = HasUnitBuffBySpellId("player", SPELL_ID.RECKLESSNESS_BUFF)
-    local bloodrage = HasUnitBuffBySpellId("player", SPELL_ID.BLOODRAGE_BUFF)
-    local berserkerRage = HasUnitBuffBySpellId("player", SPELL_ID.BERSERKER_RAGE_BUFF)
+    local flurry = HasUnitAuraBySpellId("player", SPELL_ID.FLURRY_BUFF)
+    local deathWish = HasUnitAuraBySpellId("player", SPELL_ID.DEATH_WISH_BUFF)
+    local reck = HasUnitAuraBySpellId("player", SPELL_ID.RECKLESSNESS_BUFF)
+    local bloodrage = HasUnitAuraBySpellId("player", SPELL_ID.BLOODRAGE_BUFF)
+    local berserkerRage = HasUnitAuraBySpellId("player", SPELL_ID.BERSERKER_RAGE_BUFF)
     local battleShout, battleShoutRemaining = GetUnitBuffInfoBySpellIds("player", BATTLE_SHOUT_RANK_ID_SET)
     return {
         flurry = flurry,
@@ -1306,10 +1548,11 @@ local function BuildProcWeightState()
 
     local procProfiles = GetBuffTrinketWeightProfiles()
     for i = 1, 40 do
-        local name, _, _, _, _, _, _, _, _, spellId = UnitBuff("player", i)
+        local name, _, _, _, _, _, _, _, _, v10, v11 = UnitBuff("player", i)
         if not name then
             break
         end
+        local spellId = ExtractAuraSpellId(nil, nil, v10, v11)
         local profile = procProfiles[spellId]
         if profile and profile.weights then
             AddWeightBag(weights, profile.weights, 1)
@@ -1804,7 +2047,7 @@ ReadOverpowerState = function()
     if ns.metrics and ns.metrics.GetOverpowerState then
         local state = ns.metrics.GetOverpowerState(targetGuid, GetTime())
         if type(state) == "table" then
-            result.active = state.active and true or false
+            result.active = state.active and IsBattleStanceStrict() or false
             result.targetGuid = state.targetGuid
             result.remaining = tonumber(state.remaining) or 0
             result.triggeredAt = tonumber(state.triggeredAt) or 0
@@ -2723,9 +2966,11 @@ local function BuildDpsEvaluations(context)
         rageCost = ABILITIES[TOKENS.OVERPOWER].rage,
         cooldown = context.cooldown.op,
         predicate = function(ctx)
-            return ctx.stance == "Battle"
-                and ctx.overpowerState
-                and ctx.overpowerState.active
+            local opState = ctx.overpowerState or {}
+            return IsBattleStanceStrict()
+                and opState.active
+                and (opState.remaining or 0) > 0
+                and (not opState.targetGuid or opState.targetGuid == UnitGUID("target"))
         end,
         predicateReason = "需战斗姿态且当前目标刚躲闪后才可用",
     })
@@ -3468,6 +3713,21 @@ local function IsPredictableToken(context, entry)
     if token == TOKENS.EXECUTE then
         -- 满血/非斩杀阶段不应提前预测斩杀。
         return context.targetHealthPct and context.targetHealthPct <= 20
+    end
+    if token == TOKENS.OVERPOWER then
+        local opState = context and context.overpowerState or nil
+        local targetGuid = UnitGUID("target")
+        if not IsBattleStanceStrict() then
+            return false
+        end
+        if not opState or not opState.active or (opState.remaining or 0) <= 0 then
+            return false
+        end
+        if opState.targetGuid and targetGuid and opState.targetGuid ~= targetGuid then
+            return false
+        end
+        -- 压制只在窗口真实可用时参与预测，避免旧锁/ready-soon 把它带出主推荐树。
+        return entry.passed and true or false
     end
     if (token == TOKENS.SUNDER_ARMOR or token == TOKENS.BLOODTHIRST or token == TOKENS.WHIRLWIND or token == TOKENS.OVERPOWER or token == TOKENS.REVENGE
         or token == TOKENS.SHIELD_SLAM or token == TOKENS.SHIELD_BLOCK or token == TOKENS.TAUNT or token == TOKENS.MOCKING_BLOW)
@@ -4904,6 +5164,8 @@ function Decision.GetRecommendation()
         compatDumpSkill = queueIndicator.token
         compatDumpReason = queueIndicator.reason
     end
+
+    MaybePrintOverpowerDebug(context, recommendedAction, rankedRecommendations)
 
     return {
         mode = context.mode,

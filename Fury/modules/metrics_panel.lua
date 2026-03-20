@@ -276,8 +276,9 @@ local function Render()
         12,
         "Queue状态: " .. (queueIndicator and queueIndicator.token or "EMPTY")
             .. "   Queue解释: " .. (queueIndicator and queueIndicator.reason or "-")
-            .. "   兼容GCD: " .. (decision.nextGcdSkill or decision.nextSkill or "WAIT")
-            .. "   兼容OGCD: " .. (decision.offGcdSkill or "NONE")
+            .. "   展示源: " .. (decision.displayNextSource or "-")
+            .. "   展示GCD: " .. (decision.displayNextSkill or "WAIT")
+            .. "   OffGCD: " .. (decision.offGcdSkill or "NONE")
             .. "   预留怒气: " .. (decision.reserveRage or 0)
             .. "   队列:" .. queuedText
             .. "   窗口:" .. qOpenText
@@ -325,6 +326,10 @@ function ns.ToggleMetricsPanel()
     if ns.db and ns.db.metrics then
         ns.db.metrics.showPanel = panel:IsShown()
     end
+end
+
+function ns.IsMetricsPanelShown()
+    return panel and panel:IsShown() or false
 end
 
 local function ApplyPanelTypography(title, hint)

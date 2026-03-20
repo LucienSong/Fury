@@ -16,11 +16,16 @@ local renderState = {
     previewCommitted = false,
     previewCommitUntil = 0,
 }
+local hudDebugState = {
+    signature = nil,
+    at = 0,
+}
 
 local timelineEvents = {}
 local transientItems = {}
 local transientPool = {}
 
+local GetTokenTexture
 local StartPreviewTransfer
 
 local TIMELINE_MARKER_BOOTSTRAP = 12
@@ -50,6 +55,54 @@ local SHORT_LABEL = {
     HAMSTRING = "HAM",
     WAIT = "WAIT",
 }
+
+local function MaybePrintHudOverpowerDebug(rec, slotRec)
+    if not rec or not slotRec or slotRec.token ~= "OVERPOWER" then
+        return
+    end
+    if not (ns.IsMetricsPanelShown and ns.IsMetricsPanelShown()) then
+        return
+    end
+
+    local context = rec.context or {}
+    local opState = context.overpowerState or {}
+    local targetGuid = UnitGUID("target")
+    local recommendedToken = rec.recommendedAction and rec.recommendedAction.token or "NONE"
+    local rankedTop = rec.rankedRecommendations and rec.rankedRecommendations[1] and rec.rankedRecommendations[1].token or "NONE"
+    local signature = table.concat({
+        tostring(slotRec.token),
+        tostring(rec.displayNextSkill or rec.nextGcdSkill or rec.nextSkill or "NONE"),
+        tostring(recommendedToken),
+        tostring(rankedTop),
+        tostring(context.stance or "None"),
+        tostring(context.stanceSource or "unknown"),
+        tostring(opState.active and true or false),
+        string.format("%.2f", tonumber(opState.remaining) or 0),
+        tostring(opState.targetGuid or "nil"),
+        tostring(targetGuid or "nil"),
+    }, "|")
+    local now = GetTime()
+    if hudDebugState.signature == signature and (now - (hudDebugState.at or 0)) < 0.75 then
+        return
+    end
+    hudDebugState.signature = signature
+    hudDebugState.at = now
+
+    if ns.Print then
+        ns.Print(string.format(
+            "HUD OP display=%s rec=%s top=%s stance=%s source=%s active=%s remain=%.2f opTarget=%s target=%s",
+            tostring(slotRec.token),
+            tostring(recommendedToken),
+            tostring(rankedTop),
+            tostring(context.stance or "None"),
+            tostring(context.stanceSource or "unknown"),
+            opState.active and "Y" or "N",
+            tonumber(opState.remaining) or 0,
+            tostring(opState.targetGuid or "nil"),
+            tostring(targetGuid or "nil")
+        ))
+    end
+end
 
 local SIZE_PRESETS = {
     compact = {
@@ -556,32 +609,6 @@ local function UpdateTransientVisuals()
     end
 end
 
-local function BuildLegacyFallbackRanked(rec)
-    if not rec then
-        return {}
-    end
-    local ranked = {}
-    local function add(token, channel, reason, state)
-        if not token or token == "" or token == "NONE" or token == "HOLD" then
-            return
-        end
-        ranked[#ranked + 1] = {
-            token = token,
-            channel = channel,
-            reason = reason,
-            cooldownRem = state and state.cooldownRem or 0,
-            rageCost = state and state.rageCost or 0,
-            rageEnough = state and state.rageEnough or true,
-            actionableNow = token ~= "WAIT" and (not state or ((state.cooldownRem or 0) <= 0.05 and state.rageEnough ~= false)),
-            passed = state and state.passed or true,
-        }
-    end
-    add(rec.displayNextSkill or rec.nextGcdSkill or rec.nextSkill, "gcd", rec.nextGcdReason or rec.reason, rec.displayNextState)
-    add(rec.offGcdSkill, "offgcd", rec.offGcdReason, rec.offGcdState)
-    add(rec.dumpQueueSkill or rec.dumpSkill, "dump", rec.dumpQueueReason or rec.dumpReason, nil)
-    return ranked
-end
-
 local function SetSlotPosition(slot, x, y)
     slot.frame:ClearAllPoints()
     slot.frame:SetPoint("TOPLEFT", iconFrame, "TOPLEFT", x, y)
@@ -871,7 +898,7 @@ local function SetSlotVisual(slot, rec, index, showText)
     SetPulse(slot.glow, slot.glowAnim, shouldGlow)
 end
 
-local function GetTokenTexture(token)
+GetTokenTexture = function(token)
     if token and ns.decision and ns.decision.GetTokenTexture then
         return ns.decision.GetTokenTexture(token)
     end
@@ -1024,9 +1051,6 @@ local function BuildVisibleRanked(rec)
     local ranked = {}
     if rec then
         ranked = rec.rankedRecommendations or {}
-        if #ranked == 0 then
-            ranked = BuildLegacyFallbackRanked(rec)
-        end
         if #ranked == 0 and rec.recommendedAction and rec.recommendedAction.token then
             ranked[1] = rec.recommendedAction
         end
@@ -1065,6 +1089,8 @@ local function UpdateSlots(rec, showText)
     local slot = rankedSlots[1]
     local slotRec = ranked[1]
     local nextPreviewToken = slotRec and slotRec.token or nil
+
+    MaybePrintHudOverpowerDebug(rec, slotRec)
 
     if renderState.previewToken and renderState.previewToken ~= nextPreviewToken and not renderState.previewCommitted then
         StartDismissPreview(renderState.previewToken, layout)

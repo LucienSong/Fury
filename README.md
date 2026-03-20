@@ -2,10 +2,10 @@
 
 作者：`Lucien`  
 WoW Classic Hardcore Realm & ID：`@硬汉-健将`  
-当前版本：`2.4`
+当前版本：`2.5`
 项目地址：`https://github.com/LucienSong/Fury`
 
-Fury 2.4 是一个面向 WoW Classic Era 的狂暴战决策辅助插件，目标是在实战中帮助你用更稳定、更可解释的优先级树逼近 DPS / TPS 最优操作。
+Fury 2.5 是一个面向 WoW Classic Era 的狂暴战决策辅助插件，目标是在实战中帮助你用更稳定、更可解释的优先级树逼近 DPS / TPS 最优操作。
 
 ## 核心功能
 
