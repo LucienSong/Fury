@@ -292,6 +292,18 @@ local TOKEN_BY_RANK_SPELL_ID = {
     -- Mocking Blow
     [694] = TOKENS.MOCKING_BLOW, [7400] = TOKENS.MOCKING_BLOW, [7402] = TOKENS.MOCKING_BLOW,
     [20559] = TOKENS.MOCKING_BLOW, [20560] = TOKENS.MOCKING_BLOW,
+    -- Single-rank / talent spells (missing from original table)
+    [23881] = TOKENS.BLOODTHIRST,       -- Bloodthirst (Fury 31-point talent)
+    [1680] = TOKENS.WHIRLWIND,          -- Whirlwind
+    [2687] = TOKENS.BLOODRAGE,          -- Bloodrage
+    [6572] = TOKENS.REVENGE, [6574] = TOKENS.REVENGE, [7379] = TOKENS.REVENGE,
+    [11600] = TOKENS.REVENGE, [11601] = TOKENS.REVENGE, [25288] = TOKENS.REVENGE,
+    [2565] = TOKENS.SHIELD_BLOCK,       -- Shield Block
+    [23922] = TOKENS.SHIELD_SLAM,       -- Shield Slam (Protection 31-point talent)
+    [23923] = TOKENS.SHIELD_SLAM, [23924] = TOKENS.SHIELD_SLAM,
+    [23925] = TOKENS.SHIELD_SLAM,
+    [12975] = TOKENS.LAST_STAND,        -- Last Stand (Protection talent)
+    [355] = TOKENS.TAUNT,               -- Taunt
 }
 
 local TOKEN_COOLDOWN_KEY = {
@@ -1002,6 +1014,15 @@ local RANK_IDS_BY_TOKEN = {
     [TOKENS.HEROIC_STRIKE] = HS_RANK_IDS,
     [TOKENS.CLEAVE] = CLEAVE_RANK_IDS,
     [TOKENS.MOCKING_BLOW] = MOCKING_BLOW_RANK_IDS,
+    -- Single-rank / talent spells (needed for ResolveHighestKnownSpellId)
+    [TOKENS.BLOODTHIRST] = { 23881 },
+    [TOKENS.WHIRLWIND] = { 1680 },
+    [TOKENS.BLOODRAGE] = { 2687 },
+    [TOKENS.REVENGE] = { 6572, 6574, 7379, 11600, 11601, 25288 },
+    [TOKENS.SHIELD_BLOCK] = { 2565 },
+    [TOKENS.SHIELD_SLAM] = { 23922, 23923, 23924, 23925 },
+    [TOKENS.LAST_STAND] = { 12975 },
+    [TOKENS.TAUNT] = { 355 },
 }
 
 -- 真实 rank 数据驱动的收益锚点（Classic Era）。
@@ -1142,12 +1163,26 @@ ResolveHighestKnownSpellId = function(token)
     return info.id
 end
 
--- Talent-spell IDs that may not appear in spellbook on Classic Era.
+-- All Classic Warrior talent-learned spell IDs that may not appear in
+-- standard spellbook scan. Covers 31-point talents + key talent-prerequisite spells.
 local TALENT_SPELL_IDS = {
-    [23881] = true,  -- Bloodthirst
-    [23922] = true,  -- Shield Slam
-    [12328] = true,  -- Death Wish
+    -- Fury tree
+    [23881] = true,  -- Bloodthirst (Fury 31-point)
+    [12328] = true,  -- Death Wish (Fury 21-point)
+    [18499] = true,  -- Berserker Rage (baseline but may behave like talent on some clients)
+    -- Arms tree
+    [12294] = true,  -- Mortal Strike (Arms 31-point)
+    [21551] = true,  -- Mortal Strike Rank 2
+    [21552] = true,  -- Mortal Strike Rank 3
+    [21553] = true,  -- Mortal Strike Rank 4
     [12292] = true,  -- Sweeping Strikes (Arms 21-point)
+    -- Protection tree
+    [23922] = true,  -- Shield Slam (Protection 31-point)
+    [23923] = true,  -- Shield Slam Rank 2
+    [23924] = true,  -- Shield Slam Rank 3
+    [23925] = true,  -- Shield Slam Rank 4
+    [12975] = true,  -- Last Stand (Protection talent)
+    [12809] = true,  -- Concussion Blow (Protection talent)
 }
 
 local function IsTokenKnown(token)
