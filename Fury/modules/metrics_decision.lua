@@ -1408,6 +1408,22 @@ local function GetUnitBuffInfoBySpellIds(unit, spellIdSet)
     if not unit or type(spellIdSet) ~= "table" then
         return false, 0, 0, nil
     end
+
+    -- Lazy evaluate and cache expected names for this set to avoid O(N*M) GetSpellInfo calls
+    local expectedNames = spellIdSet._names
+    if not expectedNames then
+        expectedNames = {}
+        for id in pairs(spellIdSet) do
+            if type(id) == "number" then
+                local n = GetSpellInfo(id)
+                if n and n ~= "" then
+                    expectedNames[n] = id
+                end
+            end
+        end
+        spellIdSet._names = expectedNames
+    end
+
     local now = GetTime()
     for i = 1, 40 do
         local name, rank, _, _, _, v6, v7, v8, v9, v10, v11 = UnitBuff(unit, i)
@@ -1428,22 +1444,22 @@ local function GetUnitBuffInfoBySpellIds(unit, spellIdSet)
         else
             auraSpellId = ExtractAuraSpellId(v8, v9, v10, v11)
         end
+
+        local matchedSpellId = nil
         if auraSpellId and spellIdSet[auraSpellId] then
+            matchedSpellId = auraSpellId
+        elseif expectedNames[name] then
+            matchedSpellId = expectedNames[name]
+        elseif rank and rank ~= "" and expectedNames[name .. "(" .. rank .. ")"] then
+            matchedSpellId = expectedNames[name .. "(" .. rank .. ")"]
+        end
+
+        if matchedSpellId then
             local remaining = 0
             if type(expirationTime) == "number" and expirationTime > 0 then
                 remaining = math.max(expirationTime - now, 0)
             end
-            return true, remaining, duration or 0, auraSpellId
-        end
-        for expectedSpellId in pairs(spellIdSet) do
-            local expectedName = GetSpellInfo(expectedSpellId)
-            if expectedName and (name == expectedName or ((rank and rank ~= "") and (name .. "(" .. rank .. ")") == expectedName)) then
-                local remaining = 0
-                if type(expirationTime) == "number" and expirationTime > 0 then
-                    remaining = math.max(expirationTime - now, 0)
-                end
-                return true, remaining, duration or 0, expectedSpellId
-            end
+            return true, remaining, duration or 0, matchedSpellId
         end
     end
     return false, 0, 0, nil
