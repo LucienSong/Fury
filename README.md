@@ -22,7 +22,7 @@ Fury 2.7 是一个面向 WoW Classic Era 的狂暴战决策辅助插件，目标
 
 ## 安装
 
-将插件目录解压或复制到：
+将包含插件核心代码的 **`Fury` 目录**完整解压或复制到：
 
 - `World of Warcraft/_classic_era_/Interface/AddOns/Fury`
 
