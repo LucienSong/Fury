@@ -739,6 +739,15 @@ local function ReleasePendingQueueEvent(token)
     end
 end
 
+local function AbortPendingQueueEvent(token)
+    for i = #timelineEvents, 1, -1 do
+        local event = timelineEvents[i]
+        if event and event.pending and event.kind == "queued" and ((not token) or event.token == token) then
+            table.remove(timelineEvents, i)
+        end
+    end
+end
+
 local function PruneTimelineEvents()
     local now = GetTime()
     local window = ns.GetDecisionTimelineSeconds and ns.GetDecisionTimelineSeconds() or 5
@@ -762,9 +771,9 @@ local function UpdateQueuedTimeline(rec)
         })
         StartPreviewTransfer(queuedToken, event)
     elseif (not queuedToken) and renderState.lastQueuedToken then
-        ReleasePendingQueueEvent(renderState.lastQueuedToken)
+        AbortPendingQueueEvent(renderState.lastQueuedToken)
     elseif queuedToken and renderState.lastQueuedToken and queuedToken ~= renderState.lastQueuedToken then
-        ReleasePendingQueueEvent(renderState.lastQueuedToken)
+        AbortPendingQueueEvent(renderState.lastQueuedToken)
         local event = PushTimelineEvent("queued", queuedToken, true, {
             texture = GetTokenTexture(queuedToken),
             label = SHORT_LABEL[queuedToken] or "",
@@ -1152,6 +1161,8 @@ local function Render()
         for i = 1, 3 do
             SetSlotVisual(rankedSlots[i], nil, i, showText)
         end
+        AbortPendingQueueEvent(nil)
+        renderState.lastQueuedToken = nil
         renderState.previewToken = nil
         renderState.previewCommitted = false
         renderState.previewCommitUntil = 0
