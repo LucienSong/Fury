@@ -7,6 +7,8 @@ WoW Classic Hardcore Realm & ID：`@硬汉-健将`
 
 Fury 2.8 是一个面向 WoW Classic Era 的狂暴战决策辅助插件，目标是在实战中帮助你用更稳定、更可解释的优先级树逼近 DPS / TPS 最优操作。
 
+![Fury Addon](gallery.jpeg)
+
 ## 核心功能
 
 - 单主图标建议：主提示区只显示当前第一优先动作
