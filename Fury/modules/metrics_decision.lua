@@ -113,7 +113,7 @@ local PerFrameCache = {
     procActive = nil,
 }
 
-local function InvalidatePerFrameCache()
+PerFrameCache.Invalidate = function()
     PerFrameCache.frame = 0
     PerFrameCache.buffState = nil
     PerFrameCache.sunderState = nil
@@ -122,7 +122,7 @@ local function InvalidatePerFrameCache()
     PerFrameCache.procActive = nil
 end
 
-local function IsPerFrameCacheValid()
+PerFrameCache.IsValid = function()
     local now = GetTime()
     if PerFrameCache.frame ~= now then
         PerFrameCache.frame = now
@@ -1165,7 +1165,8 @@ end
 
 -- Classic Era warrior talent spells that may not appear in standard spellbook
 -- scan. Only includes spells with matching TOKENS in this addon's ABILITIES table.
-local TALENT_SPELL_IDS = {
+-- Embedded in Decision table to avoid consuming a top-level local slot.
+Decision._talentSpellIds = {
     -- Fury tree
     [23881] = true,  -- Bloodthirst (Fury 31-point)
     [12328] = true,  -- Death Wish (Fury 21-point, used in ReadTalentState/ReadBuffState)
@@ -1176,7 +1177,7 @@ local TALENT_SPELL_IDS = {
     [23925] = true,  -- Shield Slam Rank 4
     [12975] = true,  -- Last Stand (Protection talent)
 }
-}
+
 
 local function IsTokenKnown(token)
     local id = ResolveHighestKnownSpellId(token)
@@ -1200,7 +1201,7 @@ local function IsTokenKnown(token)
     -- not appear in spellbook scan or be reported by IsSpellKnown/IsPlayerSpell
     -- on Classic Era. Fall back to checking if the spell name resolves via
     -- GetSpellInfo AND the spell is actually usable (i.e. player has the talent).
-    if TALENT_SPELL_IDS[id] then
+    if Decision._talentSpellIds[id] then
         local name = GetSpellInfo(id)
         if name and name ~= "" then
             -- GetSpellInfo returns a name even for unlearned spells in the DB,
@@ -1695,7 +1696,11 @@ local function ReadTrinketState()
     }
 end
 
-local function ComputeBuffState()
+local function ReadBuffState()
+    PerFrameCache.IsValid()
+    if PerFrameCache.buffState then
+        return PerFrameCache.buffState
+    end
     local flurry = HasUnitAuraBySpellId("player", SPELL_ID.FLURRY_BUFF)
     -- B2 fix: fallback to name-based detection if spell-ID match fails.
     if not flurry then
@@ -1713,7 +1718,7 @@ local function ComputeBuffState()
     local bloodrage = HasUnitAuraBySpellId("player", SPELL_ID.BLOODRAGE_BUFF)
     local berserkerRage = HasUnitAuraBySpellId("player", SPELL_ID.BERSERKER_RAGE_BUFF)
     local battleShout, battleShoutRemaining = GetUnitBuffInfoBySpellIds("player", BATTLE_SHOUT_RANK_ID_SET)
-    return {
+    local state = {
         flurry = flurry,
         deathWish = deathWish,
         recklessness = reck,
@@ -1723,14 +1728,6 @@ local function ComputeBuffState()
         battleShoutRemaining = battleShoutRemaining,
         offensiveBurst = deathWish or reck,
     }
-end
-
-local function ReadBuffState()
-    IsPerFrameCacheValid()
-    if PerFrameCache.buffState then
-        return PerFrameCache.buffState
-    end
-    local state = ComputeBuffState()
     PerFrameCache.buffState = state
     return state
 end
@@ -1770,7 +1767,11 @@ local function BuildSetWeightState(equipment)
     return weights, active
 end
 
-local function ComputeProcWeightState()
+local function BuildProcWeightState()
+    PerFrameCache.IsValid()
+    if PerFrameCache.procWeights then
+        return PerFrameCache.procWeights, PerFrameCache.procActive
+    end
     local weights = NewWeightBag()
     local active = {}
 
@@ -1787,16 +1788,6 @@ local function ComputeProcWeightState()
             table.insert(active, string.format("%s(%d)", profile.name or name, spellId or 0))
         end
     end
-
-    return weights, active
-end
-
-local function BuildProcWeightState()
-    IsPerFrameCacheValid()
-    if PerFrameCache.procWeights then
-        return PerFrameCache.procWeights, PerFrameCache.procActive
-    end
-    local weights, active = ComputeProcWeightState()
     PerFrameCache.procWeights = weights
     PerFrameCache.procActive = active
     return weights, active
@@ -2231,7 +2222,7 @@ local function EstimateExecuteDamage(rage)
 end
 
 ReadSunderState = function()
-    IsPerFrameCacheValid()
+    PerFrameCache.IsValid()
     if PerFrameCache.sunderState then
         return PerFrameCache.sunderState
     end
@@ -2265,7 +2256,7 @@ ReadSunderState = function()
 end
 
 ReadHamstringState = function()
-    IsPerFrameCacheValid()
+    PerFrameCache.IsValid()
     if PerFrameCache.hamstringState then
         return PerFrameCache.hamstringState
     end
@@ -2677,7 +2668,7 @@ local function ApplyCommonChecks(eval, context, opts)
 end
 
 -- P1: extract comparator to module-level local to avoid per-call closure allocation.
-local function EvalComparator(a, b)
+Decision._evalComparator = function(a, b)
     if a.passed ~= b.passed then
         return a.passed and not b.passed
     end
@@ -2688,7 +2679,7 @@ local function EvalComparator(a, b)
 end
 
 local function SortEvaluations(list)
-    table.sort(list, EvalComparator)
+    table.sort(list, Decision._evalComparator)
 end
 
 local function FilterUnknownEvaluations(list)
@@ -4323,7 +4314,7 @@ end
 -- Only mutable sub-tables (queue, cooldown, buffs, sunderState, hamstringState,
 -- battleShoutState, threat, swing) are shallow-copied. Read-only sub-tables
 -- (config, equipment, talents, trinket, weights, known, etc.) are shared by reference.
-local function ShallowCopy(t)
+Decision._shallowCopy = function(t)
     if type(t) ~= "table" then return t end
     local out = {}
     for k, v in pairs(t) do
@@ -4334,16 +4325,16 @@ end
 
 local function BuildPlannerState(context)
     -- Copy top-level scalars (rage, mode, gcdRem, etc.) plus reference read-only tables.
-    local state = ShallowCopy(context)
+    local state = Decision._shallowCopy(context)
     -- Shallow-copy only the mutable sub-tables so mutations don't leak back.
-    state.queue = ShallowCopy(context.queue or {})
-    state.cooldown = ShallowCopy(context.cooldown or {})
-    state.buffs = ShallowCopy(context.buffs or {})
-    state.swing = ShallowCopy(context.swing or {})
-    state.sunderState = ShallowCopy(context.sunderState or { stacks = 0, remaining = 0, hasDebuff = false })
-    state.hamstringState = ShallowCopy(context.hamstringState or { hasDebuff = false, remaining = 0 })
+    state.queue = Decision._shallowCopy(context.queue or {})
+    state.cooldown = Decision._shallowCopy(context.cooldown or {})
+    state.buffs = Decision._shallowCopy(context.buffs or {})
+    state.swing = Decision._shallowCopy(context.swing or {})
+    state.sunderState = Decision._shallowCopy(context.sunderState or { stacks = 0, remaining = 0, hasDebuff = false })
+    state.hamstringState = Decision._shallowCopy(context.hamstringState or { hasDebuff = false, remaining = 0 })
     state.battleShoutState = context.battleShoutState
-        and ShallowCopy(context.battleShoutState)
+        and Decision._shallowCopy(context.battleShoutState)
         or {
             selfActive = state.buffs.battleShout and true or false,
             selfRemaining = state.buffs.battleShoutRemaining or 0,
@@ -4355,7 +4346,7 @@ local function BuildPlannerState(context)
             buffedUnits = state.buffs.battleShout and 1 or 0,
         }
     state.threat = context.threat
-        and ShallowCopy(context.threat)
+        and Decision._shallowCopy(context.threat)
         or {
             status = 3,
             scaledPct = 110,
