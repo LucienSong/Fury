@@ -1142,6 +1142,14 @@ ResolveHighestKnownSpellId = function(token)
     return info.id
 end
 
+-- Talent-spell IDs that may not appear in spellbook on Classic Era.
+local TALENT_SPELL_IDS = {
+    [23881] = true,  -- Bloodthirst
+    [23922] = true,  -- Shield Slam
+    [12328] = true,  -- Death Wish
+    [12292] = true,  -- Sweeping Strikes (Arms 21-point)
+}
+
 local function IsTokenKnown(token)
     local id = ResolveHighestKnownSpellId(token)
     if not id then
@@ -1159,6 +1167,37 @@ local function IsTokenKnown(token)
     end
     if FindSpellBookSlotBySpellID and FindSpellBookSlotBySpellID(id) then
         return true
+    end
+    -- Talent-spell fallback: talent-learned spells (BT, Shield Slam, etc.) may
+    -- not appear in spellbook scan or be reported by IsSpellKnown/IsPlayerSpell
+    -- on Classic Era. Fall back to checking if the spell name resolves via
+    -- GetSpellInfo AND the spell is actually usable (i.e. player has the talent).
+    if TALENT_SPELL_IDS[id] then
+        local name = GetSpellInfo(id)
+        if name and name ~= "" then
+            -- GetSpellInfo returns a name even for unlearned spells in the DB,
+            -- so verify usability: IsUsableSpell returns true only if the
+            -- player actually has the spell available.
+            if IsUsableSpell and IsUsableSpell(name) then
+                -- Cache for future lookups.
+                if cache and cache.knownByToken then
+                    cache.knownByToken[token] = true
+                end
+                return true
+            end
+            -- Secondary fallback: check if it appears on the action bar or
+            -- tooltip resolves to a valid cast. Some clients expose
+            -- GetSpellCooldown for known talent spells even when other APIs fail.
+            if GetSpellCooldown then
+                local start, dur = GetSpellCooldown(name)
+                if start ~= nil then
+                    if cache and cache.knownByToken then
+                        cache.knownByToken[token] = true
+                    end
+                    return true
+                end
+            end
+        end
     end
     return false
 end
