@@ -1163,26 +1163,19 @@ ResolveHighestKnownSpellId = function(token)
     return info.id
 end
 
--- All Classic Warrior talent-learned spell IDs that may not appear in
--- standard spellbook scan. Covers 31-point talents + key talent-prerequisite spells.
+-- Classic Era warrior talent spells that may not appear in standard spellbook
+-- scan. Only includes spells with matching TOKENS in this addon's ABILITIES table.
 local TALENT_SPELL_IDS = {
     -- Fury tree
     [23881] = true,  -- Bloodthirst (Fury 31-point)
-    [12328] = true,  -- Death Wish (Fury 21-point)
-    [18499] = true,  -- Berserker Rage (baseline but may behave like talent on some clients)
-    -- Arms tree
-    [12294] = true,  -- Mortal Strike (Arms 31-point)
-    [21551] = true,  -- Mortal Strike Rank 2
-    [21552] = true,  -- Mortal Strike Rank 3
-    [21553] = true,  -- Mortal Strike Rank 4
-    [12292] = true,  -- Sweeping Strikes (Arms 21-point)
+    [12328] = true,  -- Death Wish (Fury 21-point, used in ReadTalentState/ReadBuffState)
     -- Protection tree
-    [23922] = true,  -- Shield Slam (Protection 31-point)
+    [23922] = true,  -- Shield Slam Rank 1 (Protection 31-point)
     [23923] = true,  -- Shield Slam Rank 2
     [23924] = true,  -- Shield Slam Rank 3
     [23925] = true,  -- Shield Slam Rank 4
     [12975] = true,  -- Last Stand (Protection talent)
-    [12809] = true,  -- Concussion Blow (Protection talent)
+}
 }
 
 local function IsTokenKnown(token)
