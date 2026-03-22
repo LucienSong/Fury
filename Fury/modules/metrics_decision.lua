@@ -1357,12 +1357,11 @@ ExtractAuraSpellId = function(v8, v9, v10, v11)
     return nil
 end
 
-local function AuraMatchesSpell(name, rank, spellId, v8, v9, v10, v11)
+local function AuraMatchesSpell(name, rank, spellId, expectedName, v8, v9, v10, v11)
     local auraSpellId = ExtractAuraSpellId(v8, v9, v10, v11)
     if auraSpellId == spellId then
         return true
     end
-    local expectedName = GetSpellInfo(spellId)
     if expectedName and (name == expectedName or ((rank and rank ~= "") and (name .. "(" .. rank .. ")") == expectedName)) then
         return true
     end
@@ -1373,12 +1372,13 @@ local function HasUnitAuraBySpellId(unit, spellId)
     if not unit or not spellId then
         return false
     end
+    local expectedName = GetSpellInfo(spellId)
     for i = 1, 40 do
         local name, rank, _, _, _, _, _, _, _, v10, v11 = UnitBuff(unit, i)
         if not name then
             break
         end
-        if AuraMatchesSpell(name, rank, spellId, nil, nil, v10, v11) then
+        if AuraMatchesSpell(name, rank, spellId, expectedName, nil, nil, v10, v11) then
             return true
         end
     end
@@ -1387,7 +1387,7 @@ local function HasUnitAuraBySpellId(unit, spellId)
         if not name then
             break
         end
-        if AuraMatchesSpell(name, rank, spellId, nil, nil, v10, v11) then
+        if AuraMatchesSpell(name, rank, spellId, expectedName, nil, nil, v10, v11) then
             return true
         end
     end
