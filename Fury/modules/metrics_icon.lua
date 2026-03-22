@@ -35,6 +35,8 @@ local TRANSIENT_MOVE_DURATION = 0.24
 local DISMISS_MOVE_DURATION = 0.18
 local TIMELINE_FADE_SECONDS = 1.0
 local RENDER_TICK = 0.08
+local TIMELINE_LABEL_FONT_SCALE = 0.42
+local TIMELINE_LABEL_FONT_MIN = 10
 
 local SHORT_LABEL = {
     BLOODRAGE = "BR",
@@ -721,7 +723,7 @@ local function PushTimelineSpellCast(spellId, spellName)
         spellId = spellId,
         spellName = spellName,
         texture = texture,
-        label = token and SHORT_LABEL[token] or "",
+        label = "",
     })
     if token then
         StartPreviewTransfer(token, event)
@@ -736,10 +738,11 @@ local function RefreshTimelineEventResult(event)
     if not metrics or not metrics.GetTimelineCastResultLabel then
         return
     end
-    local label, labelColor, resolved = metrics.GetTimelineCastResultLabel(event.spellId, event.spellName, event.at, event.token)
+    local label, labelColor, resolved, labelStyle = metrics.GetTimelineCastResultLabel(event.spellId, event.spellName, event.at, event.token)
     if label and label ~= "" then
         event.label = label
         event.labelColor = labelColor
+        event.labelStyle = labelStyle
         event.resultResolved = resolved and true or false
     elseif resolved then
         event.resultResolved = true
@@ -857,6 +860,11 @@ local function RefreshTimelineVisual()
             end
             marker.border:SetAlpha(alpha)
             marker.kindText:SetAlpha(alpha)
+            local fontSize = math.max(math.floor(markerSize * TIMELINE_LABEL_FONT_SCALE), TIMELINE_LABEL_FONT_MIN)
+            if event.labelStyle and event.labelStyle.scale then
+                fontSize = math.max(math.floor((fontSize * event.labelStyle.scale) + 0.5), fontSize + 1)
+            end
+            marker.kindText:SetFont(STANDARD_TEXT_FONT, fontSize, "OUTLINE")
             local labelColor = event.labelColor
             if labelColor then
                 marker.kindText:SetTextColor(labelColor[1] or 1, labelColor[2] or 1, labelColor[3] or 1)

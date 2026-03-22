@@ -111,12 +111,8 @@ local function FormatCompactDamage(value)
     return tostring(num)
 end
 
-local function FormatTimelineDamageLabel(value, critical)
-    local label = FormatCompactDamage(value)
-    if critical then
-        return label .. "!"
-    end
-    return label
+local function FormatTimelineDamageLabel(value)
+    return FormatCompactDamage(value)
 end
 
 local TIMELINE_RESULT_COLORS = {
@@ -217,25 +213,26 @@ end
 
 local function GetPendingTimelineCastLabel(cast)
     if not cast then
-        return nil, nil
+        return nil, nil, nil
     end
     if cast.sunderStacks and cast.sunderStacks > 0 then
-        return tostring(cast.sunderStacks) .. "层", { GetTimelineResultColor("normal") }
+        return tostring(cast.sunderStacks) .. "层", { GetTimelineResultColor("normal") }, nil
     end
     if cast.auraTargetCount and cast.auraTargetCount > 0 and (cast.token == "BATTLE_SHOUT" or cast.auraTargetCount > 1) then
-        return tostring(cast.auraTargetCount), { GetTimelineResultColor("normal") }
+        return tostring(cast.auraTargetCount), { GetTimelineResultColor("normal") }, nil
     end
     if cast.glancing then
-        return "GLNC", { GetTimelineResultColor("glancing") }
+        return "GLNC", { GetTimelineResultColor("glancing") }, nil
     end
     if (cast.damageTotal or 0) > 0 then
         local colorKey = cast.damageCritical and "crit" or "normal"
-        return FormatTimelineDamageLabel(cast.damageTotal, cast.damageCritical), { GetTimelineResultColor(colorKey) }
+        local style = cast.damageCritical and { scale = 1.2 } or nil
+        return FormatTimelineDamageLabel(cast.damageTotal), { GetTimelineResultColor(colorKey) }, style
     end
     if cast.failureLabel and cast.failureLabel ~= "" then
-        return cast.failureLabel, { GetTimelineResultColor(cast.failureColorKey or "failed") }
+        return cast.failureLabel, { GetTimelineResultColor(cast.failureColorKey or "failed") }, nil
     end
-    return nil, nil
+    return nil, nil, nil
 end
 
 local function ResolvePendingTimelineCast(spellName, spellId, token, nowTs, updater)
@@ -346,21 +343,21 @@ function Metrics.GetTimelineCastResultLabel(spellId, spellName, castAt, token)
 
     local pending = FindPendingTimelineCast(spellName, spellId, token, nowTs, castAt)
     if pending then
-        local label, color = GetPendingTimelineCastLabel(pending)
+        local label, color, style = GetPendingTimelineCastLabel(pending)
         local resolved = nowTs >= (pending.aggregateUntil or pending.expiresAt or nowTs)
         if label then
-            return label, color, resolved
+            return label, color, resolved, style
         end
         if nowTs >= (pending.expiresAt or nowTs) then
-            return nil, nil, true
+            return nil, nil, true, nil
         end
-        return nil, nil, false
+        return nil, nil, false, nil
     end
 
     if castAt and (nowTs - castAt) > 1.5 then
-        return nil, nil, true
+        return nil, nil, true, nil
     end
-    return nil, nil, false
+    return nil, nil, false, nil
 end
 
 function Metrics.StartFight(targetGuid)
