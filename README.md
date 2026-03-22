@@ -2,10 +2,10 @@
 
 作者：`Lucien`  
 WoW Classic Hardcore Realm & ID：`@硬汉-健将`  
-当前版本：`2.8`
+当前版本：`2.9`
 项目地址：`https://github.com/LucienSong/Fury`
 
-Fury 2.8 是一个面向 WoW Classic Era 的狂暴战决策辅助插件，目标是在实战中帮助你用更稳定、更可解释的优先级树逼近 DPS / TPS 最优操作。
+Fury 2.9 是一个面向 WoW Classic Era 的狂暴战决策辅助插件，目标是在实战中帮助你用更稳定、更可解释的优先级树逼近 DPS / TPS 最优操作。
 
 ![Fury Addon](gallery.jpeg)
 
@@ -13,6 +13,7 @@ Fury 2.8 是一个面向 WoW Classic Era 的狂暴战决策辅助插件，目标
 
 - 单主图标建议：主提示区只显示当前第一优先动作
 - 完整施放时间线：显示所有成功施放技能，并保留泄怒入队状态
+- 时间线结果摘要：可直接查看命中伤害、多目标总伤害、破甲层数、战吼影响人数与未命中结果
 - DPS / TPS 硬优先级树：不再只按当前分数混排
 - 泄怒建议：独立判断是否该用 `Heroic Strike` 或 `Cleave`
 - DPS / TPS 模式切换：支持自动按姿态切换，也支持手动强制模式

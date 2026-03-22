@@ -728,6 +728,24 @@ local function PushTimelineSpellCast(spellId, spellName)
     end
 end
 
+local function RefreshTimelineEventResult(event)
+    if not event or event.kind ~= "casted" or event.pending then
+        return
+    end
+    local metrics = ns.metrics
+    if not metrics or not metrics.GetTimelineCastResultLabel then
+        return
+    end
+    local label, labelColor, resolved = metrics.GetTimelineCastResultLabel(event.spellId, event.spellName, event.at, event.token)
+    if label and label ~= "" then
+        event.label = label
+        event.labelColor = labelColor
+        event.resultResolved = resolved and true or false
+    elseif resolved then
+        event.resultResolved = true
+    end
+end
+
 local function ReleasePendingQueueEvent(token)
     local event = FindPendingQueueEvent(token)
     if event then
@@ -811,6 +829,7 @@ local function RefreshTimelineVisual()
             marker:Hide()
             SetPulse(marker.glow, marker.glowAnim, false)
         else
+            RefreshTimelineEventResult(event)
             local age = math.max(now - (event.at or 0), 0)
             local progress = event.pending and 0 or math.min(age / math.max(window, 1), 1)
             local x = math.floor(progress * math.max(width - markerSize - 2, 1))
@@ -838,6 +857,12 @@ local function RefreshTimelineVisual()
             end
             marker.border:SetAlpha(alpha)
             marker.kindText:SetAlpha(alpha)
+            local labelColor = event.labelColor
+            if labelColor then
+                marker.kindText:SetTextColor(labelColor[1] or 1, labelColor[2] or 1, labelColor[3] or 1)
+            else
+                marker.kindText:SetTextColor(1, 1, 1)
+            end
             marker.kindText:SetText(event.pending and "" or (event.label or ""))
             if (not event.pending) and event.label and event.label ~= "" then
                 marker.kindText:Show()

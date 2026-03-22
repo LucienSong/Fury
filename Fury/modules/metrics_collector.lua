@@ -126,7 +126,7 @@ local function HandleCombatLog()
 
     if subEvent == "SPELL_MISSED" and sourceGUID == playerGUID then
         local missType = data[15]
-        metrics.RecordSpellMiss(missType)
+        metrics.RecordSpellMiss(missType, spellName, spellId)
         if missType == "DODGE" and destGUID and IsBattleStanceActive() and IsOverpowerTriggerSpell(spellId, spellName) then
             metrics.RecordTargetDodged(destGUID, GetTime())
         end
@@ -144,8 +144,14 @@ local function HandleCombatLog()
         return
     end
 
-    if (subEvent == "SPELL_AURA_APPLIED" or subEvent == "SPELL_AURA_REFRESH" or subEvent == "SPELL_AURA_REMOVED") and destGUID == playerGUID then
-        metrics.RecordAuraEvent(spellName, spellId, subEvent, GetTime())
+    if subEvent == "SPELL_AURA_APPLIED" or subEvent == "SPELL_AURA_REFRESH"
+        or subEvent == "SPELL_AURA_REMOVED" or subEvent == "SPELL_AURA_APPLIED_DOSE" then
+        local amount = data[16]
+        if metrics.RecordAuraCombatEvent then
+            metrics.RecordAuraCombatEvent(spellName, spellId, subEvent, destGUID, amount, sourceGUID, GetTime())
+        elseif destGUID == playerGUID then
+            metrics.RecordAuraEvent(spellName, spellId, subEvent, GetTime())
+        end
     end
 end
 

@@ -10,6 +10,10 @@ local Metrics = {
         lastFight = nil,
         history = {},
         maxHistory = 20,
+        timelineCastSeq = 0,
+        recentTimelineResults = {},
+        pendingTimelineCasts = {},
+        sunderStacksByTarget = {},
         recentHostiles = {},
         hostileCountCache = {
             window = 0,
@@ -70,6 +74,181 @@ local function SafeDiv(a, b)
         return 0
     end
     return a / b
+end
+
+local function ResolveDecisionToken(spellName, spellId)
+    local decision = ns.decision
+    local token = nil
+    if decision and decision.GetTokenForSpellId and spellId then
+        token = decision.GetTokenForSpellId(spellId)
+    end
+    if not token and decision and decision.GetTokenForSpellName then
+        token = decision.GetTokenForSpellName(spellName)
+    end
+    return token
+end
+
+local function FormatCompactDamage(value)
+    local num = math.floor(math.abs(tonumber(value) or 0) + 0.5)
+    if num >= 1000000 then
+        local scaled = num / 1000000
+        if scaled >= 10 then
+            return string.format("%.0fm", scaled)
+        end
+        local out = string.format("%.1fm", scaled)
+        local trimmed = out:gsub("%.0m$", "m")
+        return trimmed
+    end
+    if num >= 1000 then
+        local scaled = num / 1000
+        if scaled >= 10 then
+            return string.format("%.0fk", scaled)
+        end
+        local out = string.format("%.1fk", scaled)
+        local trimmed = out:gsub("%.0k$", "k")
+        return trimmed
+    end
+    return tostring(num)
+end
+
+local function FormatTimelineDamageLabel(value, critical)
+    local label = FormatCompactDamage(value)
+    if critical then
+        return label .. "!"
+    end
+    return label
+end
+
+local TIMELINE_RESULT_COLORS = {
+    normal = { 1, 1, 1 },
+    crit = { 1, 0.82, 0.2 },
+    glancing = { 0.72, 0.72, 0.72 },
+    block = { 0.45, 0.8, 1 },
+    failed = { 1, 0.25, 0.25 },
+}
+
+local TIMELINE_AGGREGATE_WINDOW = 0.35
+
+local RESULT_LABEL_MAP = {
+    ABSORB = "ABS",
+    BLOCK = "BLK",
+    DEFLECT = "DEF",
+    DODGE = "DODGE",
+    EVADE = "EVA",
+    IMMUNE = "IMM",
+    MISS = "MISS",
+    PARRY = "PARRY",
+    REFLECT = "RFL",
+    RESIST = "RES",
+}
+
+local function NormalizeResultLabel(resultType)
+    local key = strupper(tostring(resultType or ""))
+    if key == "" then
+        return nil
+    end
+    return RESULT_LABEL_MAP[key] or key
+end
+
+local function GetTimelineOutcomeColorKey(resultType, defaultKey)
+    local key = strupper(tostring(resultType or ""))
+    if key == "BLOCK" then
+        return "block"
+    end
+    return defaultKey
+end
+
+local function GetTimelineResultColor(kind)
+    local color = TIMELINE_RESULT_COLORS[kind] or TIMELINE_RESULT_COLORS.normal
+    return color[1], color[2], color[3]
+end
+
+local function PruneTimelineHistory(nowTs)
+    local state = Metrics.state
+    for i = #state.pendingTimelineCasts, 1, -1 do
+        local cast = state.pendingTimelineCasts[i]
+        if (not cast) or nowTs > (cast.expiresAt or 0) then
+            table.remove(state.pendingTimelineCasts, i)
+        end
+    end
+    for i = #state.recentTimelineResults, 1, -1 do
+        local result = state.recentTimelineResults[i]
+        if (not result) or (nowTs - (result.at or 0) > 8) then
+            table.remove(state.recentTimelineResults, i)
+        end
+    end
+end
+
+local function IsSameTimelineCast(cast, spellName, spellId, token)
+    if not cast then
+        return false
+    end
+    if token and cast.token and token == cast.token then
+        return true
+    end
+    if spellId and cast.spellId and spellId == cast.spellId then
+        return true
+    end
+    if spellName and cast.spellName and spellName == cast.spellName then
+        return true
+    end
+    return false
+end
+
+local function FindPendingTimelineCast(spellName, spellId, token, refTs, castAt)
+    local bestCast = nil
+    local bestDiff = nil
+    local nowTs = refTs or Now()
+    local diffBase = castAt or nowTs
+    for i = #Metrics.state.pendingTimelineCasts, 1, -1 do
+        local cast = Metrics.state.pendingTimelineCasts[i]
+        if cast and nowTs >= ((cast.at or 0) - 0.1)
+            and nowTs <= (cast.expiresAt or 0)
+            and IsSameTimelineCast(cast, spellName, spellId, token) then
+            local diff = math.abs((cast.at or diffBase) - diffBase)
+            if (not bestDiff) or diff < bestDiff then
+                bestDiff = diff
+                bestCast = cast
+            end
+        end
+    end
+    return bestCast
+end
+
+local function GetPendingTimelineCastLabel(cast)
+    if not cast then
+        return nil, nil
+    end
+    if cast.sunderStacks and cast.sunderStacks > 0 then
+        return tostring(cast.sunderStacks) .. "层", { GetTimelineResultColor("normal") }
+    end
+    if cast.auraTargetCount and cast.auraTargetCount > 0 and (cast.token == "BATTLE_SHOUT" or cast.auraTargetCount > 1) then
+        return tostring(cast.auraTargetCount), { GetTimelineResultColor("normal") }
+    end
+    if cast.glancing then
+        return "GLNC", { GetTimelineResultColor("glancing") }
+    end
+    if (cast.damageTotal or 0) > 0 then
+        local colorKey = cast.damageCritical and "crit" or "normal"
+        return FormatTimelineDamageLabel(cast.damageTotal, cast.damageCritical), { GetTimelineResultColor(colorKey) }
+    end
+    if cast.failureLabel and cast.failureLabel ~= "" then
+        return cast.failureLabel, { GetTimelineResultColor(cast.failureColorKey or "failed") }
+    end
+    return nil, nil
+end
+
+local function ResolvePendingTimelineCast(spellName, spellId, token, nowTs, updater)
+    PruneTimelineHistory(nowTs)
+    local cast = FindPendingTimelineCast(spellName, spellId, token, nowTs)
+    if not cast then
+        return false
+    end
+    if type(updater) == "function" then
+        updater(cast)
+    end
+    cast.updatedAt = nowTs
+    return true
 end
 
 local function NewFight(targetGuid)
@@ -161,6 +340,29 @@ function Metrics.NotifyChanged()
     end
 end
 
+function Metrics.GetTimelineCastResultLabel(spellId, spellName, castAt, token)
+    local nowTs = Now()
+    PruneTimelineHistory(nowTs)
+
+    local pending = FindPendingTimelineCast(spellName, spellId, token, nowTs, castAt)
+    if pending then
+        local label, color = GetPendingTimelineCastLabel(pending)
+        local resolved = nowTs >= (pending.aggregateUntil or pending.expiresAt or nowTs)
+        if label then
+            return label, color, resolved
+        end
+        if nowTs >= (pending.expiresAt or nowTs) then
+            return nil, nil, true
+        end
+        return nil, nil, false
+    end
+
+    if castAt and (nowTs - castAt) > 1.5 then
+        return nil, nil, true
+    end
+    return nil, nil, false
+end
+
 function Metrics.StartFight(targetGuid)
     if Metrics.state.activeFight then
         return Metrics.state.activeFight
@@ -168,6 +370,7 @@ function Metrics.StartFight(targetGuid)
     Metrics.state.overpowerWindow.targetGuid = nil
     Metrics.state.overpowerWindow.triggeredAt = 0
     Metrics.state.overpowerWindow.expireAt = 0
+    Metrics.state.sunderStacksByTarget = {}
     Metrics.state.activeFight = NewFight(targetGuid)
     Metrics.NotifyChanged()
     return Metrics.state.activeFight
@@ -264,6 +467,7 @@ function Metrics.EndFight()
     Metrics.state.overpowerWindow.targetGuid = nil
     Metrics.state.overpowerWindow.triggeredAt = 0
     Metrics.state.overpowerWindow.expireAt = 0
+    Metrics.state.sunderStacksByTarget = {}
     Metrics.NotifyChanged()
     return summary
 end
@@ -518,6 +722,20 @@ function Metrics.RecordSwingDamage(amount, critical, glancing, isOffHand)
         fight.hitCountWhite = fight.hitCountWhite + 1
     end
     UpdateSwingClock(isOffHand, Now())
+    if glancing then
+        ResolvePendingTimelineCast(nil, nil, nil, Now(), function(cast)
+            cast.glancing = true
+            cast.damageTotal = 0
+            cast.damageCritical = false
+            cast.failureLabel = nil
+        end)
+    else
+        ResolvePendingTimelineCast(nil, nil, nil, Now(), function(cast)
+            cast.damageTotal = (cast.damageTotal or 0) + dmg
+            cast.damageCritical = cast.damageCritical or (critical and true or false)
+            cast.failureLabel = nil
+        end)
+    end
 end
 
 function Metrics.RecordSwingMiss(missType, isOffHand, ts)
@@ -534,6 +752,10 @@ function Metrics.RecordSwingMiss(missType, isOffHand, ts)
         fight.parryCount = fight.parryCount + 1
     end
     UpdateSwingClock(isOffHand, ts or Now())
+    ResolvePendingTimelineCast(nil, nil, nil, ts or Now(), function(cast)
+        cast.failureLabel = NormalizeResultLabel(missType)
+        cast.failureColorKey = GetTimelineOutcomeColorKey(missType, "failed")
+    end)
 end
 
 function Metrics.RecordSpellDamage(spellName, spellId, amount, critical)
@@ -555,9 +777,14 @@ function Metrics.RecordSpellDamage(spellName, spellId, amount, critical)
     else
         fight.hitCountYellow = fight.hitCountYellow + 1
     end
+    ResolvePendingTimelineCast(spellName, spellId, ResolveDecisionToken(spellName, spellId), Now(), function(cast)
+        cast.damageTotal = (cast.damageTotal or 0) + dmg
+        cast.damageCritical = cast.damageCritical or (critical and true or false)
+        cast.failureLabel = nil
+    end)
 end
 
-function Metrics.RecordSpellMiss(missType)
+function Metrics.RecordSpellMiss(missType, spellName, spellId)
     local fight = Metrics.state.activeFight
     if not fight then
         return
@@ -570,6 +797,10 @@ function Metrics.RecordSpellMiss(missType)
     elseif missType == "PARRY" then
         fight.parryCount = fight.parryCount + 1
     end
+    ResolvePendingTimelineCast(spellName, spellId, ResolveDecisionToken(spellName, spellId), Now(), function(cast)
+        cast.failureLabel = NormalizeResultLabel(missType)
+        cast.failureColorKey = GetTimelineOutcomeColorKey(missType, "failed")
+    end)
 end
 
 function Metrics.RecordCast(spellName, spellId, ts)
@@ -579,14 +810,7 @@ function Metrics.RecordCast(spellName, spellId, ts)
     end
 
     local nowTs = ts or Now()
-    local decision = ns.decision
-    local token = nil
-    if decision and decision.GetTokenForSpellId and spellId then
-        token = decision.GetTokenForSpellId(spellId)
-    end
-    if not token and decision and decision.GetTokenForSpellName then
-        token = decision.GetTokenForSpellName(spellName)
-    end
+    local token = ResolveDecisionToken(spellName, spellId)
     local rec = fight.recommendation
     if rec and rec.pending and nowTs > rec.pending.expireAt then
         rec.pending = nil
@@ -599,6 +823,29 @@ function Metrics.RecordCast(spellName, spellId, ts)
     end
     if token == "OVERPOWER" then
         Metrics.ClearOverpowerWindow()
+    end
+
+    Metrics.state.timelineCastSeq = (Metrics.state.timelineCastSeq or 0) + 1
+    PruneTimelineHistory(nowTs)
+    table.insert(Metrics.state.pendingTimelineCasts, {
+        castSeq = Metrics.state.timelineCastSeq,
+        at = nowTs,
+        aggregateUntil = nowTs + TIMELINE_AGGREGATE_WINDOW,
+        expiresAt = nowTs + 1.5,
+        spellId = spellId,
+        spellName = spellName,
+        token = token,
+        damageTotal = 0,
+        damageCritical = false,
+        glancing = false,
+        failureLabel = nil,
+        failureColorKey = nil,
+        auraTargets = {},
+        auraTargetCount = 0,
+        sunderStacks = nil,
+    })
+    while #Metrics.state.pendingTimelineCasts > 24 do
+        table.remove(Metrics.state.pendingTimelineCasts, 1)
     end
 
     if spellId == SPELL_ID.BLOODTHIRST or spellName == SPELL.BLOODTHIRST then
@@ -665,6 +912,56 @@ function Metrics.RecordAuraEvent(spellName, spellId, eventType, ts)
         local field = "uptime" .. buffKey:sub(1, 1):upper() .. buffKey:sub(2)
         fight[field] = (fight[field] or 0) + (nowTs - activeSince)
         fight.buffActiveSince[buffKey] = nil
+    end
+end
+
+function Metrics.RecordAuraCombatEvent(spellName, spellId, eventType, destGuid, amount, sourceGuid, ts)
+    local fight = Metrics.state.activeFight
+    if not fight then
+        return
+    end
+
+    local nowTs = ts or Now()
+    local playerGuid = UnitGUID("player")
+    if destGuid and playerGuid and destGuid == playerGuid and eventType ~= "SPELL_AURA_APPLIED_DOSE" then
+        Metrics.RecordAuraEvent(spellName, spellId, eventType, nowTs)
+    end
+
+    if not sourceGuid or not playerGuid or sourceGuid ~= playerGuid then
+        return
+    end
+
+    local token = ResolveDecisionToken(spellName, spellId)
+    if token == "BATTLE_SHOUT" and destGuid and (eventType == "SPELL_AURA_APPLIED" or eventType == "SPELL_AURA_REFRESH") then
+        ResolvePendingTimelineCast(spellName, spellId, token, nowTs, function(cast)
+            cast.auraTargets = cast.auraTargets or {}
+            if not cast.auraTargets[destGuid] then
+                cast.auraTargets[destGuid] = true
+                cast.auraTargetCount = (cast.auraTargetCount or 0) + 1
+            end
+        end)
+    end
+
+    if token == "SUNDER_ARMOR" and destGuid then
+        local stacksByTarget = Metrics.state.sunderStacksByTarget or {}
+        Metrics.state.sunderStacksByTarget = stacksByTarget
+        local nextStacks = stacksByTarget[destGuid]
+        if eventType == "SPELL_AURA_APPLIED" then
+            nextStacks = 1
+        elseif eventType == "SPELL_AURA_APPLIED_DOSE" then
+            nextStacks = tonumber(amount) or nextStacks or 1
+        elseif eventType == "SPELL_AURA_REFRESH" then
+            nextStacks = nextStacks or 1
+        elseif eventType == "SPELL_AURA_REMOVED" then
+            nextStacks = nil
+        end
+        stacksByTarget[destGuid] = nextStacks
+        ResolvePendingTimelineCast(spellName, spellId, token, nowTs, function(cast)
+            cast.sunderStacks = nextStacks
+            if nextStacks then
+                cast.failureLabel = nil
+            end
+        end)
     end
 end
 
