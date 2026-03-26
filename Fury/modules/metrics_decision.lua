@@ -93,6 +93,15 @@ local GCD_FALLBACK_SPELL_IDS = {
 local EXECUTE_MODEL_CACHE = nil
 local EXECUTE_MODEL_CACHE_AT = 0
 local EXECUTE_MODEL_CACHE_TTL = 15
+Decision._spellDescriptionCache = {}
+Decision._dynamicRankUtilityModelCache = {}
+Decision._tokensSkipGenericLevelUtilityScale = {
+    [TOKENS.HEROIC_STRIKE] = true,
+    [TOKENS.CLEAVE] = true,
+    [TOKENS.EXECUTE] = true,
+    [TOKENS.BATTLE_SHOUT] = true,
+    [TOKENS.SUNDER_ARMOR] = true,
+}
 local EquipmentStateCache = {
     dirty = true,
     value = nil,
@@ -1214,18 +1223,6 @@ local function IsTokenKnown(token)
                 end
                 return true
             end
-            -- Secondary fallback: check if it appears on the action bar or
-            -- tooltip resolves to a valid cast. Some clients expose
-            -- GetSpellCooldown for known talent spells even when other APIs fail.
-            if GetSpellCooldown then
-                local start, dur = GetSpellCooldown(name)
-                if start ~= nil then
-                    if cache and cache.knownByToken then
-                        cache.knownByToken[token] = true
-                    end
-                    return true
-                end
-            end
         end
     end
     return false
@@ -1247,7 +1244,7 @@ local function GetSpellNameByToken(token)
 end
 
 local function GetTokenRankUtilityScale(token)
-    local model = TOKEN_RANK_UTILITY_MODEL[token]
+    local model = TOKEN_RANK_UTILITY_MODEL[token] or Decision.GetTokenDynamicRankUtilityModel(token)
     if not model or type(model.ranks) ~= "table" or #model.ranks == 0 then
         return nil
     end
@@ -1281,6 +1278,11 @@ local function GetTokenRankUtilityScale(token)
     local floorScale = Clamp(tonumber(model.floorScale) or 0.35, 0, 1)
     local scale = Clamp(knownValue / maxValue, floorScale, 1)
     return scale, knownValue, maxValue, knownId
+end
+
+Decision.GetTokenKnownRankValue = function(token)
+    local _, knownValue, maxValue, knownId = GetTokenRankUtilityScale(token)
+    return knownValue or maxValue or 0, maxValue or 0, knownId
 end
 
 local function IsDumpQueuedToken(token)
@@ -1552,6 +1554,8 @@ end
 local function InvalidateExecuteModelCache()
     EXECUTE_MODEL_CACHE = nil
     EXECUTE_MODEL_CACHE_AT = 0
+    Decision._spellDescriptionCache = {}
+    Decision._dynamicRankUtilityModelCache = {}
 end
 
 local function InvalidateEquipmentStateCache()
@@ -1984,6 +1988,12 @@ local function BuildContext()
     local playerLevel = UnitLevel and (UnitLevel("player") or 60) or 60
     local critChance = GetCritChance and (GetCritChance() or 0) or 0
     local hitModifier = GetHitModifier and (GetHitModifier() or 0) or 0
+    local minMainDamage, maxMainDamage, minOffDamage, maxOffDamage = 0, 0, 0, 0
+    if UnitDamage then
+        minMainDamage, maxMainDamage, minOffDamage, maxOffDamage = UnitDamage("player")
+    end
+    local averageMainHandDamage = (((tonumber(minMainDamage) or 0) + (tonumber(maxMainDamage) or 0)) / 2)
+    local averageOffHandDamage = (((tonumber(minOffDamage) or 0) + (tonumber(maxOffDamage) or 0)) / 2)
     local talents = ReadTalentState()
     local equipment = ReadEquipmentState()
     local trinket = ReadTrinketState()
@@ -2038,6 +2048,8 @@ local function BuildContext()
         horizonSec = horizonSec,
         rage = rage,
         attackPower = attackPower,
+        averageMainHandDamage = averageMainHandDamage,
+        averageOffHandDamage = averageOffHandDamage,
         playerLevel = playerLevel,
         critChance = critChance,
         hitModifier = hitModifier,
@@ -2093,17 +2105,17 @@ local function BuildContext()
         activeProcProfiles = activeProcProfiles,
         gcdRem = GetGcdRemaining(),
         cooldown = {
-            br = GetCooldownRemaining(GetSpellNameByToken(TOKENS.BLOODRAGE)),
-            bt = GetCooldownRemaining(GetSpellNameByToken(TOKENS.BLOODTHIRST)),
-            ww = GetCooldownRemaining(GetSpellNameByToken(TOKENS.WHIRLWIND)),
-            ex = GetCooldownRemaining(GetSpellNameByToken(TOKENS.EXECUTE)),
-            op = GetCooldownRemaining(GetSpellNameByToken(TOKENS.OVERPOWER)),
-            rev = GetCooldownRemaining(GetSpellNameByToken(TOKENS.REVENGE)),
-            sb = GetCooldownRemaining(GetSpellNameByToken(TOKENS.SHIELD_BLOCK)),
-            ss = GetCooldownRemaining(GetSpellNameByToken(TOKENS.SHIELD_SLAM)),
-            ls = GetCooldownRemaining(GetSpellNameByToken(TOKENS.LAST_STAND)),
-            taunt = GetCooldownRemaining(GetSpellNameByToken(TOKENS.TAUNT)),
-            mb = GetCooldownRemaining(GetSpellNameByToken(TOKENS.MOCKING_BLOW)),
+            br = (IsTokenKnown(TOKENS.BLOODRAGE) == false) and 999 or GetCooldownRemaining(GetSpellNameByToken(TOKENS.BLOODRAGE)),
+            bt = (IsTokenKnown(TOKENS.BLOODTHIRST) == false) and 999 or GetCooldownRemaining(GetSpellNameByToken(TOKENS.BLOODTHIRST)),
+            ww = (IsTokenKnown(TOKENS.WHIRLWIND) == false) and 999 or GetCooldownRemaining(GetSpellNameByToken(TOKENS.WHIRLWIND)),
+            ex = (IsTokenKnown(TOKENS.EXECUTE) == false) and 999 or GetCooldownRemaining(GetSpellNameByToken(TOKENS.EXECUTE)),
+            op = (IsTokenKnown(TOKENS.OVERPOWER) == false) and 999 or GetCooldownRemaining(GetSpellNameByToken(TOKENS.OVERPOWER)),
+            rev = (IsTokenKnown(TOKENS.REVENGE) == false) and 999 or GetCooldownRemaining(GetSpellNameByToken(TOKENS.REVENGE)),
+            sb = (IsTokenKnown(TOKENS.SHIELD_BLOCK) == false) and 999 or GetCooldownRemaining(GetSpellNameByToken(TOKENS.SHIELD_BLOCK)),
+            ss = (IsTokenKnown(TOKENS.SHIELD_SLAM) == false) and 999 or GetCooldownRemaining(GetSpellNameByToken(TOKENS.SHIELD_SLAM)),
+            ls = (IsTokenKnown(TOKENS.LAST_STAND) == false) and 999 or GetCooldownRemaining(GetSpellNameByToken(TOKENS.LAST_STAND)),
+            taunt = (IsTokenKnown(TOKENS.TAUNT) == false) and 999 or GetCooldownRemaining(GetSpellNameByToken(TOKENS.TAUNT)),
+            mb = (IsTokenKnown(TOKENS.MOCKING_BLOW) == false) and 999 or GetCooldownRemaining(GetSpellNameByToken(TOKENS.MOCKING_BLOW)),
         },
     }
 end
@@ -2112,6 +2124,222 @@ local function EstimateBtDamage(ap)
     -- Classic: Bloodthirst 伤害约等于 AP 的 45%。
     local attackPower = ap or 0
     return math.max(attackPower * 0.45, 0)
+end
+
+Decision.GetSpellDescriptionBySpellId = function(spellId)
+    if not spellId then
+        return nil
+    end
+    if Decision._spellDescriptionCache[spellId] ~= nil then
+        local cached = Decision._spellDescriptionCache[spellId]
+        return cached ~= false and cached or nil
+    end
+    local desc = nil
+    if C_Spell and C_Spell.GetSpellDescription then
+        desc = C_Spell.GetSpellDescription(spellId)
+    elseif GetSpellDescription then
+        desc = GetSpellDescription(spellId)
+    end
+    Decision._spellDescriptionCache[spellId] = desc or false
+    return desc
+end
+
+Decision._extractDescriptionNumbers = function(desc)
+    local values = {}
+    if type(desc) ~= "string" or desc == "" then
+        return values
+    end
+    for n in desc:gmatch("(%d+%.?%d*)") do
+        table.insert(values, tonumber(n))
+    end
+    return values
+end
+
+Decision._parseFirstDescriptionNumber = function(desc, minValue, maxValue)
+    local values = Decision._extractDescriptionNumbers(desc)
+    local minBound = tonumber(minValue) or 0
+    local maxBound = tonumber(maxValue) or math.huge
+    for i = 1, #values do
+        local value = tonumber(values[i]) or 0
+        if value >= minBound and value <= maxBound then
+            return value
+        end
+    end
+    return nil
+end
+
+Decision._parseLargestDescriptionNumber = function(desc, minValue, maxValue)
+    local values = Decision._extractDescriptionNumbers(desc)
+    local minBound = tonumber(minValue) or 0
+    local maxBound = tonumber(maxValue) or math.huge
+    local best = nil
+    for i = 1, #values do
+        local value = tonumber(values[i]) or 0
+        if value >= minBound and value <= maxBound and (not best or value > best) then
+            best = value
+        end
+    end
+    return best
+end
+
+Decision._parseAverageDamageRange = function(desc, minValue, maxValue)
+    local values = Decision._extractDescriptionNumbers(desc)
+    local minBound = tonumber(minValue) or 0
+    local maxBound = tonumber(maxValue) or math.huge
+    for i = 1, (#values - 1) do
+        local a = tonumber(values[i]) or 0
+        local b = tonumber(values[i + 1]) or 0
+        if a >= minBound and a <= maxBound and b >= minBound and b <= maxBound and b >= a then
+            local span = b - a
+            if span <= math.max(120, b * 0.65) then
+                return (a + b) / 2
+            end
+        end
+    end
+    return nil
+end
+
+Decision.ParseTokenRankUtilityValue = function(token, desc)
+    if type(desc) ~= "string" or desc == "" then
+        return nil
+    end
+    if token == TOKENS.REVENGE or token == TOKENS.SHIELD_SLAM then
+        local avg = Decision._parseAverageDamageRange(desc, 10, 5000)
+        if avg and avg > 0 then
+            return avg
+        end
+        return Decision._parseLargestDescriptionNumber(desc, 10, 5000)
+    end
+    if token == TOKENS.BATTLE_SHOUT then
+        return Decision._parseLargestDescriptionNumber(desc, 5, 2000)
+    end
+    if token == TOKENS.HEROIC_STRIKE or token == TOKENS.CLEAVE or token == TOKENS.MOCKING_BLOW
+        or token == TOKENS.SUNDER_ARMOR then
+        return Decision._parseFirstDescriptionNumber(desc, 5, 5000)
+    end
+    return Decision._parseLargestDescriptionNumber(desc, 5, 5000)
+end
+
+Decision.GetTokenDynamicRankUtilityModel = function(token)
+    if Decision._dynamicRankUtilityModelCache[token] ~= nil then
+        local cached = Decision._dynamicRankUtilityModelCache[token]
+        return cached ~= false and cached or nil
+    end
+
+    local ranks = RANK_IDS_BY_TOKEN[token]
+    if type(ranks) ~= "table" or #ranks <= 1 then
+        Decision._dynamicRankUtilityModelCache[token] = false
+        return nil
+    end
+
+    local rows = {}
+    for i = 1, #ranks do
+        local spellId = ranks[i]
+        local desc = Decision.GetSpellDescriptionBySpellId(spellId)
+        local value = Decision.ParseTokenRankUtilityValue(token, desc)
+        if value and value > 0 then
+            table.insert(rows, {
+                id = spellId,
+                value = value,
+            })
+        end
+    end
+
+    if #rows <= 1 then
+        Decision._dynamicRankUtilityModelCache[token] = false
+        return nil
+    end
+
+    local floorScale = 0.35
+    if token == TOKENS.BATTLE_SHOUT then
+        floorScale = 0.25
+    elseif token == TOKENS.HEROIC_STRIKE or token == TOKENS.CLEAVE then
+        floorScale = 0.30
+    end
+
+    local model = {
+        floorScale = floorScale,
+        ranks = rows,
+    }
+    Decision._dynamicRankUtilityModelCache[token] = model
+    return model
+end
+
+Decision.GetPhysicalDamageMultiplier = function(context)
+    local mult = 1
+    local buffs = context and context.buffs or nil
+    if buffs and buffs.deathWish then
+        mult = mult * 1.2
+    end
+    return mult
+end
+
+Decision.EstimateAverageWeaponDamage = function(context, hand)
+    local equipment = context and context.equipment or {}
+    local avg = hand == "off" and tonumber(context and context.averageOffHandDamage)
+        or tonumber(context and context.averageMainHandDamage)
+    if avg and avg > 0 then
+        return avg
+    end
+    local speed = hand == "off" and tonumber(equipment.speedOff) or tonumber(equipment.speedMain)
+    if speed and speed > 0 then
+        local ap = tonumber(context and context.attackPower) or 0
+        local estimate = (ap / 14) * speed
+        if hand == "off" then
+            estimate = estimate * 0.5
+        end
+        return math.max(estimate, 0)
+    end
+    return 0
+end
+
+Decision.EstimateBtDamageWithContext = function(context)
+    local damage = EstimateBtDamage(context and context.attackPower or 0)
+    return math.max(damage * Decision.GetPhysicalDamageMultiplier(context), 0)
+end
+
+Decision.EstimateWhirlwindDamage = function(context)
+    local hostileCount = tonumber(context and context.hostileCount) or 1
+    local targets = Clamp(hostileCount, 1, 4)
+    local equipment = context and context.equipment or {}
+    local mainDamage = Decision.EstimateAverageWeaponDamage(context, "main")
+    local offDamage = 0
+    if equipment.hasOffhandWeapon then
+        offDamage = Decision.EstimateAverageWeaponDamage(context, "off") * 0.5
+    end
+    local perTarget = math.max(mainDamage + offDamage, 0)
+    local total = perTarget * targets * Decision.GetPhysicalDamageMultiplier(context)
+    return total, targets, perTarget
+end
+
+Decision.EstimateDumpDamageBonus = function(token, context)
+    local spellId = ResolveHighestKnownSpellId(token)
+    local bonus = Decision.ParseTokenRankUtilityValue(token, Decision.GetSpellDescriptionBySpellId(spellId))
+    if not bonus or bonus <= 0 then
+        local knownValue = select(1, Decision.GetTokenKnownRankValue(token))
+        bonus = knownValue
+    end
+    bonus = tonumber(bonus) or 0
+    local targets = 1
+    if token == TOKENS.CLEAVE then
+        targets = Clamp(tonumber(context and context.hostileCount) or 1, 1, 2)
+        bonus = bonus * targets
+    end
+    return math.max(bonus * Decision.GetPhysicalDamageMultiplier(context), 0), targets, spellId
+end
+
+Decision.EstimateBattleShoutApGain = function(context, shoutState)
+    local apBonus = Decision.ParseTokenRankUtilityValue(
+        TOKENS.BATTLE_SHOUT,
+        Decision.GetSpellDescriptionBySpellId(ResolveHighestKnownSpellId(TOKENS.BATTLE_SHOUT))
+    )
+    if not apBonus or apBonus <= 0 then
+        apBonus = select(1, Decision.GetTokenKnownRankValue(TOKENS.BATTLE_SHOUT))
+    end
+    apBonus = tonumber(apBonus) or 0
+    local effectUnits = math.max(tonumber(shoutState and shoutState.effectUnits) or 0, 1)
+    local threatUnits = math.max(tonumber(shoutState and shoutState.threatUnits) or 0, effectUnits)
+    return apBonus, apBonus * effectUnits, apBonus * threatUnits
 end
 
 local function ResolveExecuteSpellId()
@@ -2199,12 +2427,7 @@ local function GetExecuteModel()
 
     local spellId = ResolveExecuteSpellId()
     if spellId then
-        local desc
-        if C_Spell and C_Spell.GetSpellDescription then
-            desc = C_Spell.GetSpellDescription(spellId)
-        elseif GetSpellDescription then
-            desc = GetSpellDescription(spellId)
-        end
+        local desc = Decision.GetSpellDescriptionBySpellId(spellId)
         local parsed = ParseExecuteModelFromDescription(desc)
         if parsed then
             model.baseDamage = parsed.baseDamage
@@ -2714,22 +2937,15 @@ end
 
 
 local function CalcSunderValueByTargetHp(targetHpPct, mode)
-    -- 将目标血量映射到 [0,1]，血越高代表破甲持续收益期越长。
     local hp = Clamp((targetHpPct or 100) / 100, 0, 1)
-    -- 使用二次曲线提升高血量区间的权重，降低低血量破甲倾向。
     local curve = hp * hp
-
-    if mode == "TPS_SURVIVAL" then
-        -- 防御姿态更看重稳定仇恨，基线略高，幅度更温和。
-        local score = -10 + 22 * curve
-        local note = string.format("目标血量%.0f%%，连续收益系数=%.2f(TPS)", hp * 100, curve)
-        return score, note
-    end
-
-    -- DPS 模式对斩杀前破甲价值敏感，低血量显著降权。
-    local score = -24 + 42 * curve
-    local note = string.format("目标血量%.0f%%，连续收益系数=%.2f(DPS)", hp * 100, curve)
-    return score, note
+    local note = string.format(
+        "目标血量%.0f%%，持续收益系数=%.2f(%s)",
+        hp * 100,
+        curve,
+        mode == "TPS_SURVIVAL" and "TPS" or "DPS"
+    )
+    return curve, note
 end
 
 local function IsRaidTrashContext(context)
@@ -2749,20 +2965,48 @@ local function GetShortTtdRejectReason(context, cfg)
 end
 
 local function CalcSunderValue(context, mode, cfg)
+    local curve, note = nil, nil
     local estTtd = context and tonumber(context.estimatedTargetTtd) or nil
     if estTtd and estTtd > 0 then
         local minTtd = math.max((cfg and cfg.sunderMinTtdSeconds) or 9, 1)
-        local curve = Clamp((estTtd - minTtd) / (minTtd * 3), 0, 1)
-        if mode == "TPS_SURVIVAL" then
-            local score = -10 + 24 * curve
-            local note = string.format("预计单人击杀时间%.1fs，持续收益系数=%.2f(TPS)", estTtd, curve)
-            return score, note
-        end
-        local score = -24 + 42 * curve
-        local note = string.format("预计单人击杀时间%.1fs，持续收益系数=%.2f(DPS)", estTtd, curve)
-        return score, note
+        curve = Clamp((estTtd - minTtd) / (minTtd * 3), 0, 1)
+        note = string.format(
+            "预计单人击杀时间%.1fs，持续收益系数=%.2f(%s)",
+            estTtd,
+            curve,
+            mode == "TPS_SURVIVAL" and "TPS" or "DPS"
+        )
+    else
+        curve, note = CalcSunderValueByTargetHp(context and context.targetHealthPct or nil, mode)
     end
-    return CalcSunderValueByTargetHp(context and context.targetHealthPct or nil, mode)
+
+    local sunderState = context and context.sunderState or nil
+    local targetStacks = math.max((cfg and cfg.sunderTargetStacks) or 5, 1)
+    local stacks = Clamp(tonumber(sunderState and sunderState.stacks) or 0, 0, targetStacks)
+    local remaining = math.max(tonumber(sunderState and sunderState.remaining) or 0, 0)
+    local refreshWindow = math.max((cfg and cfg.sunderRefreshSeconds) or 8, 1)
+    local missingStacks = math.max(targetStacks - stacks, 0)
+    local stackPressure = 0.45
+    if missingStacks > 0 then
+        stackPressure = 1 + math.max(missingStacks - 1, 0) * 0.18
+    elseif remaining <= refreshWindow then
+        stackPressure = 0.85
+    end
+
+    local armorPerStack, maxArmor = Decision.GetTokenKnownRankValue(TOKENS.SUNDER_ARMOR)
+    local divisor = mode == "TPS_SURVIVAL" and 150 or 135
+    local floorPenalty = mode == "TPS_SURVIVAL" and 5 or 14
+    local rawScore = ((tonumber(armorPerStack) or tonumber(maxArmor) or 0) / divisor) * curve * stackPressure - floorPenalty
+    local score = rawScore >= 0 and math.floor(rawScore + 0.5) or math.ceil(rawScore - 0.5)
+    local detail = string.format(
+        "%s，当前%d/%d层，单层减甲≈%d，层数压力x%.2f",
+        note,
+        stacks,
+        targetStacks,
+        math.floor((armorPerStack or maxArmor or 0) + 0.5),
+        stackPressure
+    )
+    return score, detail
 end
 
 local function IsBattleShoutRefreshWindow(shoutState)
@@ -2877,6 +3121,10 @@ local function BuildBattleShoutEval(context, cfg, mode, threat)
         else
             AddReason(shout, 4, "Battle Shout 即将到期(" .. string.format("%.1f", playerShoutRemaining or 0) .. "s)")
         end
+        local shoutAp, teamApGain = Decision.EstimateBattleShoutApGain(context, shoutState)
+        if teamApGain > 0 then
+            AddReason(shout, math.floor(teamApGain / 120), string.format("当前rank Battle Shout 预计补充约%.0f团队AP(单体≈%.0f)", teamApGain, shoutAp))
+        end
         if shoutState.effectUnits > 1 then
             AddReason(shout, math.floor((shoutState.effectUnits - 1) * 1.5), "兼顾队友覆盖收益")
         end
@@ -2896,8 +3144,12 @@ local function BuildBattleShoutEval(context, cfg, mode, threat)
     end
 
     local curThreat = threat or context.threat or ReadThreatState()
+    local shoutAp, _, threatApGain = Decision.EstimateBattleShoutApGain(context, shoutState)
     AddReason(shout, 8, "Battle Shout 提供近似 AoE 仇恨")
     AddReason(shout, math.floor((shoutState.threatUnits or 0) * 12), "按受益单位数估算 Battle Shout 仇恨")
+    if threatApGain > 0 then
+        AddReason(shout, math.floor(threatApGain / 110), string.format("当前rank Battle Shout 预计补充约%.0f仇恨向AP(单体≈%.0f)", threatApGain, shoutAp))
+    end
     if curThreat.status <= 1 or curThreat.scaledPct < 90 then
         AddReason(shout, 6, "仇恨未稳时 shout threat 更有价值")
     end
@@ -3145,6 +3397,9 @@ local function ApplyLevelUtilityScale(eval, context, token)
     if not eval or not eval.passed then
         return
     end
+    if Decision._tokensSkipGenericLevelUtilityScale[token] then
+        return
+    end
     local lvl = tonumber(context and context.playerLevel) or 60
     if lvl >= 60 then
         return
@@ -3219,7 +3474,7 @@ local function BuildDpsEvaluations(context)
         return BuildOutOfCombatEvaluations(context)
     end
 
-    local ex = NewEval(TOKENS.EXECUTE, 95)
+    local ex = NewEval(TOKENS.EXECUTE, 0)
     ApplyCommonChecks(ex, context, {
         requireTarget = true,
         usableToken = TOKENS.EXECUTE,
@@ -3232,12 +3487,22 @@ local function BuildDpsEvaluations(context)
         predicateReason = "目标不在斩杀阶段",
     })
     if ex.passed then
-        AddReason(ex, 30, "斩杀阶段优先级最高")
+        local exDamage, exExtraRage, exModel = EstimateExecuteDamage(context.rage)
+        local exAnchor = math.floor(exDamage / 6)
+        AddReason(ex, exAnchor, string.format(
+            "当前怒气/当前rank估算 Execute≈%.0f(额外怒气=%d,模型=%s:b%.0f+r*%.0f)",
+            exDamage,
+            exExtraRage,
+            exModel and exModel.source or "unknown",
+            exModel and exModel.baseDamage or 0,
+            exModel and exModel.perRage or 0
+        ))
+        AddReason(ex, 16, "斩杀阶段即时伤害优先")
         if w.execute ~= 0 then
             AddReason(ex, w.execute, "白名单权重: Execute")
         end
         if w.dps ~= 0 then
-            AddReason(ex, math.floor(w.dps * 0.4), "白名单权重: DPS倾向")
+            AddReason(ex, math.floor(w.dps * 0.3), "白名单权重: DPS倾向")
         end
         if dpsAggressiveBonus > 0 then
             AddReason(ex, dpsAggressiveBonus, "仇恨余量较高，可更激进压缩输出空窗")
@@ -3300,8 +3565,9 @@ local function BuildDpsEvaluations(context)
             if w.bloodthirst ~= 0 then
                 AddReason(eval, w.bloodthirst, "白名单权重: Bloodthirst")
             end
-            if w.ap > 0 then
-                AddReason(eval, math.floor(w.ap / 120), "白名单权重: AP加成")
+            local btDamage = Decision.EstimateBtDamageWithContext(context)
+            if btDamage > 0 then
+                AddReason(eval, math.floor(btDamage / 45), string.format("当前AP估算 Bloodthirst≈%.0f", btDamage))
             end
             if dpsAggressiveBonus > 0 then
                 AddReason(eval, dpsAggressiveBonus, "仇恨余量较高，可更积极使用主循环")
@@ -3313,7 +3579,7 @@ local function BuildDpsEvaluations(context)
     -- 斩杀阶段下，按当前 AP 与怒气动态比较 BT vs Execute 的瞬时收益。
     -- 这样高 AP/低额外怒气场景下，BT 有机会超过 Execute。
     if context.targetHealthPct and context.targetHealthPct <= 20 and ex.passed and bt.passed then
-        local btDamage = EstimateBtDamage(context.attackPower)
+        local btDamage = Decision.EstimateBtDamageWithContext(context)
         local exDamage, exExtraRage, exModel = EstimateExecuteDamage(context.rage)
         local ratio = exDamage > 0 and (btDamage / exDamage) or 0
         local detail = string.format(
@@ -3339,7 +3605,7 @@ local function BuildDpsEvaluations(context)
         end
     end
 
-    local ww = NewEval(TOKENS.WHIRLWIND, 74)
+    local ww = NewEval(TOKENS.WHIRLWIND, 70)
     ApplyCommonChecks(ww, context, {
         requireTarget = true,
         usableToken = TOKENS.WHIRLWIND,
@@ -3347,14 +3613,15 @@ local function BuildDpsEvaluations(context)
         rageCost = ABILITIES[TOKENS.WHIRLWIND].rage,
         cooldown = context.cooldown.ww,
     })
-    if ww.passed and context.hostileCount >= 2 then
-        AddReason(ww, 18, "多目标环境增益")
-    end
     if ww.passed then
+        local wwDamage, wwTargets, perTargetDamage = Decision.EstimateWhirlwindDamage(context)
+        if wwDamage > 0 then
+            AddReason(ww, math.floor(wwDamage / 38), string.format("按当前武器/目标数估算 Whirlwind≈%.0f(%d目标,单目标≈%.0f)", wwDamage, wwTargets, perTargetDamage))
+        end
         if context.hostileCount <= 1 then
-            AddReason(ww, -12, "单体下优先保证 Bloodthirst")
+            AddReason(ww, -10, "单体下优先保证 Bloodthirst")
         elseif context.hostileCount >= 3 then
-            AddReason(ww, 10, "3+目标时顺劈价值显著提升")
+            AddReason(ww, 6, "3+目标时顺劈覆盖更充分")
         end
         if context.buffs and context.buffs.offensiveBurst then
             AddReason(ww, 6, "爆发Buff窗口，顺劈收益增强")
@@ -3397,7 +3664,9 @@ local function BuildDpsEvaluations(context)
 
     local shout = BuildBattleShoutEval(context, cfg, "DPS", threat)
     if shout.passed and context.weights and context.weights.ap > 0 then
-        AddReason(shout, math.floor(context.weights.ap / 180), "白名单权重: AP团队收益")
+        local _, teamApGain = Decision.EstimateBattleShoutApGain(context, context.battleShoutState)
+        local apFactor = Clamp((teamApGain or 0) / 240, 0.5, 3)
+        AddReason(shout, math.floor((context.weights.ap / 180) * apFactor), "白名单权重: AP团队收益")
     end
     table.insert(list, shout)
 
@@ -3743,8 +4012,9 @@ local function BuildTpsEvaluations(context)
             if w.bloodthirst ~= 0 then
                 AddReason(eval, w.bloodthirst, "白名单权重: Bloodthirst")
             end
-            if w.ap > 0 then
-                AddReason(eval, math.floor(w.ap / 140), "白名单权重: AP加成")
+            local btDamage = Decision.EstimateBtDamageWithContext(context)
+            if btDamage > 0 then
+                AddReason(eval, math.floor(btDamage / 55), string.format("当前AP估算 Bloodthirst≈%.0f", btDamage))
             end
         end,
     })
@@ -3807,6 +4077,9 @@ local function BuildTpsEvaluations(context)
     end
     table.insert(list, wait)
 
+    ApplyLevelUtilityScale(mb, context, TOKENS.MOCKING_BLOW)
+    ApplyLevelUtilityScale(rev, context, TOKENS.REVENGE)
+    ApplyLevelUtilityScale(ss, context, TOKENS.SHIELD_SLAM)
     ApplyLevelUtilityScale(shout, context, TOKENS.BATTLE_SHOUT)
     FilterUnknownEvaluations(list)
     SortEvaluations(list)
@@ -3831,6 +4104,18 @@ local function PickBest(list)
         return TOKENS.WAIT, "候选技能均不满足，等待窗口"
     end
     return best.token, (best.reasons[1] or "最高分候选"), best
+end
+
+Decision.PickBestActionEval = function(list)
+    if not list or #list == 0 then
+        return nil, nil, nil
+    end
+    for _, entry in ipairs(list) do
+        if entry.passed and entry.token ~= TOKENS.NONE and entry.token ~= TOKENS.WAIT and entry.token ~= TOKENS.HOLD then
+            return entry.token, (entry.reasons[1] or "最高分候选"), entry
+        end
+    end
+    return nil, nil, nil
 end
 
 local function IsActionToken(token)
@@ -4212,7 +4497,7 @@ local function BuildDumpEvaluations(context)
     local usableRage = context.rage - reserve
 
     local list = {}
-    local cleave = NewEval(TOKENS.CLEAVE, 65)
+    local cleave = NewEval(TOKENS.CLEAVE, 54)
     ApplyCommonChecks(cleave, context, {
         requireTarget = true,
         usableToken = TOKENS.CLEAVE,
@@ -4230,6 +4515,10 @@ local function BuildDumpEvaluations(context)
         predicateReason = "非多目标/怒气需预留/仇恨未稳",
     })
     if cleave.passed then
+        local cleaveBonus, cleaveTargets = Decision.EstimateDumpDamageBonus(TOKENS.CLEAVE, context)
+        if cleaveBonus > 0 then
+            AddReason(cleave, math.floor(cleaveBonus / 10), string.format("当前rank顺劈额外伤害≈%.0f(%d目标)", cleaveBonus, cleaveTargets))
+        end
         AddReason(cleave, 12, "多目标怒气泄放")
         if context.equipment and context.equipment.dualWieldWeapon then
             AddReason(cleave, 3, "双持场景下多目标泄怒更平滑")
@@ -4241,9 +4530,10 @@ local function BuildDumpEvaluations(context)
             AddReason(cleave, math.floor(w.haste / 10), "白名单权重: 急速促使泄怒")
         end
     end
+    ApplyLevelUtilityScale(cleave, context, TOKENS.CLEAVE)
     table.insert(list, cleave)
 
-    local hs = NewEval(TOKENS.HEROIC_STRIKE, 60)
+    local hs = NewEval(TOKENS.HEROIC_STRIKE, 50)
     ApplyCommonChecks(hs, context, {
         requireTarget = true,
         usableToken = TOKENS.HEROIC_STRIKE,
@@ -4260,6 +4550,12 @@ local function BuildDumpEvaluations(context)
         end,
         predicateReason = "怒气需预留或仇恨未稳",
     })
+    if hs.passed then
+        local hsBonus = Decision.EstimateDumpDamageBonus(TOKENS.HEROIC_STRIKE, context)
+        if hsBonus > 0 then
+            AddReason(hs, math.floor(hsBonus / 9), string.format("当前rank英勇打击额外伤害≈%.0f", hsBonus))
+        end
+    end
     if hs.passed and context.hostileCount == 1 then
         AddReason(hs, 8, "单目标怒气泄放")
     end
@@ -4274,6 +4570,7 @@ local function BuildDumpEvaluations(context)
             AddReason(hs, math.floor(w.crit / 4), "白名单权重: 暴击环境")
         end
     end
+    ApplyLevelUtilityScale(hs, context, TOKENS.HEROIC_STRIKE)
     table.insert(list, hs)
 
     local hold = NewEval(TOKENS.HOLD, 20)
@@ -5099,7 +5396,7 @@ local function ShouldRecommendDpsDump(context, dumpEval, premiumEval, readySoonP
     if context.queue and context.queue.queuedDumpToken and context.queue.queuedDumpToken ~= TOKENS.HOLD then
         return false
     end
-    if not (context.queue and context.queue.queueWindowOpen) then
+    if not (context.queue and context.queue.queueWindowOpen) and (tonumber(context and context.rage) or 0) < 95 then
         return false
     end
     if (context.gcdRem or 0) > 0.05 then
@@ -5118,7 +5415,7 @@ local function ShouldRecommendTpsDump(context, dumpEval, revEval, ssEval, tauntE
     if context.queue and context.queue.queuedDumpToken and context.queue.queuedDumpToken ~= TOKENS.HOLD then
         return false
     end
-    if not (context.queue and context.queue.queueWindowOpen) then
+    if not (context.queue and context.queue.queueWindowOpen) and (tonumber(context and context.rage) or 0) < 95 then
         return false
     end
     if (context.threat and ((context.threat.status or 0) <= 1 or (context.threat.scaledPct or 0) < 95)) then
@@ -5238,10 +5535,7 @@ end
 
 local function BuildCurrentRecommendedAction(context, nextEvaluations, dumpEvaluations, offGcdEvaluations)
     local queueIndicator = BuildQueueIndicator(context)
-    local bestDumpToken, bestDumpReason, bestDumpEval = PickBest(dumpEvaluations)
-    if not bestDumpEval or not bestDumpEval.passed or bestDumpToken == TOKENS.HOLD then
-        bestDumpToken, bestDumpReason, bestDumpEval = nil, nil, nil
-    end
+    local bestDumpToken, bestDumpReason, bestDumpEval = Decision.PickBestActionEval(dumpEvaluations)
 
     if context.mode == "DPS" then
         local bloodrageEval = GetPassedEvalByToken(offGcdEvaluations, TOKENS.BLOODRAGE)
@@ -5250,8 +5544,10 @@ local function BuildCurrentRecommendedAction(context, nextEvaluations, dumpEvalu
         local sunderEval = GetPassedEvalByToken(nextEvaluations, TOKENS.SUNDER_ARMOR)
         local shoutEval = GetPassedEvalByToken(nextEvaluations, TOKENS.BATTLE_SHOUT)
         local hamEval = GetPassedEvalByToken(nextEvaluations, TOKENS.HAMSTRING)
+        local hasFallbackGcd = sunderEval or shoutEval or hamEval
 
         if bloodrageEval and not premiumEval and not readySoonPremiumEval
+            and not hasFallbackGcd
             and (context.rage or 0) < 30 and not IsPlannerBloodrageRedundant(context) then
             return BuildRecommendedEntry(context, TOKENS.BLOODRAGE, bloodrageEval, "offgcd"), queueIndicator
         end
@@ -5264,9 +5560,6 @@ local function BuildCurrentRecommendedAction(context, nextEvaluations, dumpEvalu
         if ShouldRecommendDpsDump(context, bestDumpEval, premiumEval, readySoonPremiumEval) then
             return BuildRecommendedEntry(context, bestDumpToken, bestDumpEval, "dump", bestDumpReason), queueIndicator
         end
-        if bloodrageEval and (context.rage or 0) < 30 and not IsPlannerBloodrageRedundant(context) then
-            return BuildRecommendedEntry(context, TOKENS.BLOODRAGE, bloodrageEval, "offgcd"), queueIndicator
-        end
         if sunderEval then
             return BuildRecommendedEntry(context, TOKENS.SUNDER_ARMOR, sunderEval, "gcd"), queueIndicator
         end
@@ -5275,6 +5568,9 @@ local function BuildCurrentRecommendedAction(context, nextEvaluations, dumpEvalu
         end
         if hamEval then
             return BuildRecommendedEntry(context, TOKENS.HAMSTRING, hamEval, "gcd"), queueIndicator
+        end
+        if bloodrageEval and (context.rage or 0) < 30 and not IsPlannerBloodrageRedundant(context) then
+            return BuildRecommendedEntry(context, TOKENS.BLOODRAGE, bloodrageEval, "offgcd"), queueIndicator
         end
         if bestDumpEval then
             return BuildRecommendedEntry(context, bestDumpToken, bestDumpEval, "dump", bestDumpReason), queueIndicator
@@ -5357,10 +5653,7 @@ end
 local function BuildDpsRankedRecommendations(context, nextEvaluations, dumpEvaluations, offGcdEvaluations)
     local ranked = {}
     local seen = {}
-    local bestDumpToken, bestDumpReason, bestDumpEval = PickBest(dumpEvaluations)
-    if not bestDumpEval or not bestDumpEval.passed or bestDumpToken == TOKENS.HOLD then
-        bestDumpToken, bestDumpReason, bestDumpEval = nil, nil, nil
-    end
+    local bestDumpToken, bestDumpReason, bestDumpEval = Decision.PickBestActionEval(dumpEvaluations)
 
     local bloodrageEval = GetPassedEvalByToken(offGcdEvaluations, TOKENS.BLOODRAGE)
     local sunderEval = GetPassedEvalByToken(nextEvaluations, TOKENS.SUNDER_ARMOR)
@@ -5369,6 +5662,7 @@ local function BuildDpsRankedRecommendations(context, nextEvaluations, dumpEvalu
     local premiumEvals = BuildOrderedDpsPremiumEvals(context, nextEvaluations)
     local premiumEval = premiumEvals[1]
     local readySoonPremiumEval = (not premiumEval) and FindReadySoonDpsPremiumEval(context, nextEvaluations) or nil
+    local hasFallbackGcd = sunderEval or shoutEval or hamEval
 
     if not context.inCombat then
         if shoutEval then
@@ -5378,6 +5672,7 @@ local function BuildDpsRankedRecommendations(context, nextEvaluations, dumpEvalu
     end
 
     if bloodrageEval and not premiumEval and not readySoonPremiumEval
+        and not hasFallbackGcd
         and (context.rage or 0) < 30 and not IsPlannerBloodrageRedundant(context) then
         AppendRecommendedEntry(ranked, seen, BuildRecommendedEntry(context, TOKENS.BLOODRAGE, bloodrageEval, "offgcd"))
     end
@@ -5394,9 +5689,6 @@ local function BuildDpsRankedRecommendations(context, nextEvaluations, dumpEvalu
     if ShouldRecommendDpsDump(context, bestDumpEval, premiumEval, readySoonPremiumEval) then
         AppendRecommendedEntry(ranked, seen, BuildRecommendedEntry(context, bestDumpToken, bestDumpEval, "dump", bestDumpReason))
     end
-    if bloodrageEval and (context.rage or 0) < 30 and not IsPlannerBloodrageRedundant(context) then
-        AppendRecommendedEntry(ranked, seen, BuildRecommendedEntry(context, TOKENS.BLOODRAGE, bloodrageEval, "offgcd"))
-    end
     if sunderEval then
         AppendRecommendedEntry(ranked, seen, BuildRecommendedEntry(context, TOKENS.SUNDER_ARMOR, sunderEval, "gcd"))
     end
@@ -5405,6 +5697,9 @@ local function BuildDpsRankedRecommendations(context, nextEvaluations, dumpEvalu
     end
     if hamEval then
         AppendRecommendedEntry(ranked, seen, BuildRecommendedEntry(context, TOKENS.HAMSTRING, hamEval, "gcd"))
+    end
+    if bloodrageEval and (context.rage or 0) < 30 and not IsPlannerBloodrageRedundant(context) then
+        AppendRecommendedEntry(ranked, seen, BuildRecommendedEntry(context, TOKENS.BLOODRAGE, bloodrageEval, "offgcd"))
     end
     if bestDumpEval then
         AppendRecommendedEntry(ranked, seen, BuildRecommendedEntry(context, bestDumpToken, bestDumpEval, "dump", bestDumpReason))
@@ -5415,10 +5710,7 @@ end
 local function BuildTpsRankedRecommendations(context, nextEvaluations, dumpEvaluations, offGcdEvaluations)
     local ranked = {}
     local seen = {}
-    local bestDumpToken, bestDumpReason, bestDumpEval = PickBest(dumpEvaluations)
-    if not bestDumpEval or not bestDumpEval.passed or bestDumpToken == TOKENS.HOLD then
-        bestDumpToken, bestDumpReason, bestDumpEval = nil, nil, nil
-    end
+    local bestDumpToken, bestDumpReason, bestDumpEval = Decision.PickBestActionEval(dumpEvaluations)
 
     local lsEval = GetPassedEvalByToken(offGcdEvaluations, TOKENS.LAST_STAND)
     local sbEval = GetPassedEvalByToken(offGcdEvaluations, TOKENS.SHIELD_BLOCK)
@@ -5529,7 +5821,7 @@ function Decision.GetRecommendation()
     local displayRageEnough = context.rage >= displayRageCost
 
     local dumpEvaluations, reserveRage = BuildDumpEvaluations(context)
-    local dumpSkill, dumpReason = PickBest(dumpEvaluations)
+    local dumpSkill, dumpReason = Decision.PickBestActionEval(dumpEvaluations)
     local offGcdEvaluations = BuildOffGcdEvaluations(context, mainEvaluations)
     local offGcdSkill, offGcdReason, offGcdEval = PickBestOffGcd(offGcdEvaluations)
     local offGcdRageCost = GetTokenRageCost(offGcdSkill)
@@ -5561,7 +5853,8 @@ function Decision.GetRecommendation()
     if recommendedAction and recommendedAction.channel == "gcd" and compatNextSkill == TOKENS.WAIT then
         compatNextSkill = recommendedAction.token
         compatNextReason = recommendedAction.reason
-    elseif recommendedAction and recommendedAction.channel == "dump" and (compatDumpSkill == TOKENS.HOLD or compatDumpSkill == TOKENS.NONE) then
+    elseif recommendedAction and recommendedAction.channel == "dump"
+        and (not compatDumpSkill or compatDumpSkill == TOKENS.HOLD or compatDumpSkill == TOKENS.NONE) then
         compatDumpSkill = recommendedAction.token
         compatDumpReason = recommendedAction.reason
     elseif recommendedAction and recommendedAction.channel == "offgcd" and (compatOffGcdSkill == TOKENS.NONE or compatOffGcdSkill == TOKENS.WAIT) then
