@@ -21,6 +21,7 @@ local decisionIconCheck
 local iconTextCheck
 local iconEditCheck
 local hamstringExecuteCheck
+local queueDebugCheck
 local iconSizeLabel
 local timelineWidthLabel
 local timelineSecondsLabel
@@ -161,6 +162,9 @@ local function RefreshOptionsState()
     end
     if hamstringExecuteCheck and ns.IsHamstringExecutePhaseEnabled then
         hamstringExecuteCheck:SetChecked(ns.IsHamstringExecutePhaseEnabled())
+    end
+    if queueDebugCheck and ns.IsQueueDebugEnabled then
+        queueDebugCheck:SetChecked(ns.IsQueueDebugEnabled())
     end
     if iconSizeLabel and ns.GetDecisionIconBaseSize then
         iconSizeLabel:SetText("推荐图标大小: " .. tostring(ns.GetDecisionIconBaseSize()) .. "px")
@@ -450,6 +454,16 @@ local function BuildDecisionPage(parent)
     hamstringDesc:SetWidth(520)
     hamstringDesc:SetJustifyH("LEFT")
     hamstringDesc:SetText("默认关闭，避免斩杀期断筋抢占 Execute / BT / WW 的 GCD。")
+
+    queueDebugCheck = CreateFrame("CheckButton", "FuryOptionsQueueDebugCheck", page, "InterfaceOptionsCheckButtonTemplate")
+    queueDebugCheck:SetPoint("TOPLEFT", hamstringDesc, "BOTTOMLEFT", -4, -14)
+    _G[queueDebugCheck:GetName() .. "Text"]:SetText("队列调试（在聊天框输出 HS/Cleave 排队检测事件）")
+    queueDebugCheck:SetScript("OnClick", function(self)
+        if ns.SetQueueDebugEnabled then
+            ns.SetQueueDebugEnabled(self:GetChecked())
+            RefreshOptionsState()
+        end
+    end)
 end
 
 local function BuildSunderPage(parent)

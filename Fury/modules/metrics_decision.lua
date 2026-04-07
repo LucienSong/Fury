@@ -728,6 +728,15 @@ function ns.IsHamstringExecutePhaseEnabled()
     return cfg.allowExecutePhase and true or false
 end
 
+function ns.SetQueueDebugEnabled(enabled)
+    if not ns.db or not ns.db.metrics then return end
+    ns.db.metrics.queueDebugEnabled = enabled and true or false
+end
+
+function ns.IsQueueDebugEnabled()
+    return ns.db and ns.db.metrics and ns.db.metrics.queueDebugEnabled and true or false
+end
+
 function Decision.GetModeOverride()
     local raw = ns.db and ns.db.metrics and ns.db.metrics.modeOverride
     if raw == "dps" or raw == "tps" then
@@ -1285,40 +1294,157 @@ Decision.GetTokenKnownRankValue = function(token)
     return knownValue or maxValue or 0, maxValue or 0, knownId
 end
 
-local function IsDumpQueuedToken(token)
+-- Merged queue detection: IsCurrentSpell with spell IDs (works for macros too)
+Decision.GetQueuedDumpFlags = function()
     if not IsCurrentSpell then
-        return false
+        return false, false
     end
-    if token == TOKENS.HEROIC_STRIKE then
-        local hsName = GetSpellNameByToken(TOKENS.HEROIC_STRIKE)
-        if hsName and IsCurrentSpell(hsName) then
-            return true
-        end
-        for i = 1, #HS_RANK_IDS do
-            if IsCurrentSpell(HS_RANK_IDS[i]) then
-                return true
-            end
-        end
-    elseif token == TOKENS.CLEAVE then
-        local clName = GetSpellNameByToken(TOKENS.CLEAVE)
-        if clName and IsCurrentSpell(clName) then
-            return true
-        end
-        for i = 1, #CLEAVE_RANK_IDS do
-            if IsCurrentSpell(CLEAVE_RANK_IDS[i]) then
-                return true
-            end
+    local hsCurrent = false
+    local cleaveCurrent = false
+    for i = 1, #HS_RANK_IDS do
+        if IsCurrentSpell(HS_RANK_IDS[i]) then
+            hsCurrent = true
+            break
         end
     end
-    return false
+    for i = 1, #CLEAVE_RANK_IDS do
+        if IsCurrentSpell(CLEAVE_RANK_IDS[i]) then
+            cleaveCurrent = true
+            break
+        end
+    end
+    return hsCurrent, cleaveCurrent
 end
 
-local function GetQueuedDumpToken()
-    if IsDumpQueuedToken(TOKENS.CLEAVE) then
-        return TOKENS.CLEAVE
+-- Single-slot queue state with toggle-based unblock after clear events.
+-- blocked: true after clear events (target switch, leave combat, etc.)
+-- clearedToken: remembers what was showing when blocked (for stale detection)
+-- sawCleared: true once IsCurrentSpell stops reporting the cleared token
+Decision._queuedDumpState = Decision._queuedDumpState or {
+    token = nil,
+    targetGuid = nil,
+    blocked = false,
+    clearedToken = nil,
+    sawCleared = false,
+}
+
+-- Called on CURRENT_SPELL_CAST_CHANGED only
+Decision.MarkQueuedDumpStateChanged = function()
+    local state = Decision._queuedDumpState
+    local hsCurrent, cleaveCurrent = Decision.GetQueuedDumpFlags()
+    local detectedToken = nil
+    if hsCurrent and cleaveCurrent then
+        -- Transient API state during queue switch; keep current token unchanged
+        detectedToken = state.token
+    elseif hsCurrent then
+        detectedToken = TOKENS.HEROIC_STRIKE
+    elseif cleaveCurrent then
+        detectedToken = TOKENS.CLEAVE
     end
-    if IsDumpQueuedToken(TOKENS.HEROIC_STRIKE) then
+
+    if ns.IsQueueDebugEnabled() then
+        print("|cff00ff00[FuryQ]|r Mark hs=" .. tostring(hsCurrent) .. " cl=" .. tostring(cleaveCurrent) .. " det=" .. tostring(detectedToken) .. " blocked=" .. tostring(state.blocked) .. " cleared=" .. tostring(state.clearedToken) .. " saw=" .. tostring(state.sawCleared))
+    end
+
+    if state.blocked then
+        if not detectedToken then
+            -- Cleared token is no longer reported by API
+            state.sawCleared = true
+            return
+        end
+        -- A dump is detected while blocked
+        if detectedToken ~= state.clearedToken then
+            -- Different token from what was cleared: genuine new queue
+            state.blocked = false
+            state.clearedToken = nil
+            state.sawCleared = false
+            state.token = detectedToken
+            state.targetGuid = UnitGUID("target")
+            if ns.IsQueueDebugEnabled() then print("|cff00ff00[FuryQ]|r UNBLOCK (diff token) -> " .. tostring(detectedToken)) end
+            return
+        end
+        if state.sawCleared then
+            -- Same token came back after going away: user re-queued
+            state.blocked = false
+            state.clearedToken = nil
+            state.sawCleared = false
+            state.token = detectedToken
+            state.targetGuid = UnitGUID("target")
+            if ns.IsQueueDebugEnabled() then print("|cff00ff00[FuryQ]|r UNBLOCK (re-queue) -> " .. tostring(detectedToken)) end
+            return
+        end
+        -- Same token still present, never saw it go away: stale API data
+        if ns.IsQueueDebugEnabled() then print("|cff00ff00[FuryQ]|r STALE, stay blocked") end
+        return
+    end
+
+    -- Not blocked: normal update
+    if detectedToken then
+        state.token = detectedToken
+        state.targetGuid = UnitGUID("target")
+    else
+        state.token = nil
+        state.targetGuid = nil
+    end
+end
+
+-- Hard block: queue is definitively gone (leave combat, entering world, target dead)
+Decision.BlockQueuedDumpObservation = function()
+    local state = Decision._queuedDumpState
+    state.clearedToken = nil
+    state.sawCleared = true
+    state.token = nil
+    state.targetGuid = nil
+    state.blocked = true
+end
+
+-- Soft block: queue may persist in API (target switch)
+Decision.ClearQueuedDumpStateForTargetChange = function()
+    local state = Decision._queuedDumpState
+    state.clearedToken = state.token
+    state.sawCleared = false
+    state.token = nil
+    state.targetGuid = nil
+    state.blocked = true
+end
+
+-- Main entry: called on every render frame
+Decision.GetQueuedDumpToken = function()
+    local state = Decision._queuedDumpState
+    if state.blocked then
+        return TOKENS.HOLD
+    end
+    if not UnitAffectingCombat("player") then
+        Decision.BlockQueuedDumpObservation()
+        return TOKENS.HOLD
+    end
+    local targetGuid = UnitGUID("target")
+    local targetExists = UnitExists("target") and UnitCanAttack("player", "target")
+    local targetDead = (UnitIsDead and UnitIsDead("target"))
+        or (UnitIsDeadOrGhost and UnitIsDeadOrGhost("target"))
+        or false
+    if not targetExists or targetDead or not targetGuid then
+        Decision.BlockQueuedDumpObservation()
+        return TOKENS.HOLD
+    end
+    if state.targetGuid and state.targetGuid ~= targetGuid then
+        Decision.ClearQueuedDumpStateForTargetChange()
+        return TOKENS.HOLD
+    end
+    if state.token then
+        return state.token
+    end
+    -- Lazy initial detection (e.g. addon loaded mid-combat)
+    local hsCurrent, cleaveCurrent = Decision.GetQueuedDumpFlags()
+    if hsCurrent then
+        state.token = TOKENS.HEROIC_STRIKE
+        state.targetGuid = targetGuid
         return TOKENS.HEROIC_STRIKE
+    end
+    if cleaveCurrent then
+        state.token = TOKENS.CLEAVE
+        state.targetGuid = targetGuid
+        return TOKENS.CLEAVE
     end
     return TOKENS.HOLD
 end
@@ -2020,8 +2146,8 @@ local function BuildContext()
     local swing = ns.metrics and ns.metrics.GetSwingState and ns.metrics.GetSwingState(GetTime()) or nil
     local timeToMain = swing and swing.timeToMain or 99
     local queueWindowOpen = timeToMain <= (hsQueueCfg.queueWindowMs / 1000)
-    local queuedDumpToken = GetQueuedDumpToken()
     local targetExists = UnitExists("target") and UnitCanAttack("player", "target")
+    local queuedDumpToken = Decision.GetQueuedDumpToken()
     local inRaidGroup = IsInRaidGroup()
     local targetLevel = targetExists and (UnitLevel("target") or 0) or 0
     local targetClassification = targetExists and (UnitClassification("target") or "normal") or "normal"
@@ -2062,6 +2188,7 @@ local function BuildContext()
         targetEliteLike = targetEliteLike,
         targetBossLike = targetBossLike,
         targetExists = targetExists,
+        targetGuid = UnitGUID("target"),
         inRaidGroup = inRaidGroup,
         config = cfg,
         estimatedTargetTtd = targetTtd,
@@ -4875,7 +5002,9 @@ local function CollectPlannerCandidates(state, bundle)
         if entry.token == TOKENS.NONE or entry.token == TOKENS.HOLD then
             return
         end
-        if (entry.token == TOKENS.HEROIC_STRIKE or entry.token == TOKENS.CLEAVE) and queuedDumpToken then
+        if (entry.token == TOKENS.HEROIC_STRIKE or entry.token == TOKENS.CLEAVE)
+            and queuedDumpToken and queuedDumpToken ~= TOKENS.HOLD
+            and entry.token == queuedDumpToken then
             return
         end
         if not entry.passed and entry.token ~= TOKENS.WAIT then
@@ -5393,7 +5522,8 @@ local function ShouldRecommendDpsDump(context, dumpEval, premiumEval, readySoonP
     if readySoonPremiumEval then
         return false
     end
-    if context.queue and context.queue.queuedDumpToken and context.queue.queuedDumpToken ~= TOKENS.HOLD then
+    if context.queue and context.queue.queuedDumpToken and context.queue.queuedDumpToken ~= TOKENS.HOLD
+        and dumpEval.token == context.queue.queuedDumpToken then
         return false
     end
     if not (context.queue and context.queue.queueWindowOpen) and (tonumber(context and context.rage) or 0) < 95 then
@@ -5412,7 +5542,8 @@ local function ShouldRecommendTpsDump(context, dumpEval, revEval, ssEval, tauntE
     if not dumpEval or not dumpEval.passed then
         return false
     end
-    if context.queue and context.queue.queuedDumpToken and context.queue.queuedDumpToken ~= TOKENS.HOLD then
+    if context.queue and context.queue.queuedDumpToken and context.queue.queuedDumpToken ~= TOKENS.HOLD
+        and dumpEval.token == context.queue.queuedDumpToken then
         return false
     end
     if not (context.queue and context.queue.queueWindowOpen) and (tonumber(context and context.rage) or 0) < 95 then
@@ -5975,16 +6106,8 @@ end
 
 function DecisionModule:Init()
     local frame = CreateFrame("Frame")
-    frame:RegisterEvent("PLAYER_ENTERING_WORLD")
-    frame:RegisterEvent("PLAYER_LEVEL_UP")
-    frame:RegisterEvent("SPELLS_CHANGED")
-    frame:RegisterEvent("LEARNED_SPELL_IN_TAB")
-    frame:RegisterEvent("CHARACTER_POINTS_CHANGED")
-    frame:RegisterEvent("PLAYER_EQUIPMENT_CHANGED")
-    frame:RegisterEvent("GROUP_ROSTER_UPDATE")
-    frame:RegisterEvent("PARTY_MEMBERS_CHANGED")
-    frame:RegisterEvent("RAID_ROSTER_UPDATE")
-    frame:RegisterEvent("UNIT_AURA")
+    -- Set handler BEFORE registering events so a failed RegisterEvent cannot
+    -- abort Init before the handler exists.
     frame:SetScript("OnEvent", function(_, event, arg1)
         if event == "PLAYER_ENTERING_WORLD" then
             InvalidateExecuteModelCache()
@@ -5992,6 +6115,22 @@ function DecisionModule:Init()
             InvalidateBattleShoutAuraCache()
             Decision._spellTokenCache = nil
             ResetHabitState(nil, UnitAffectingCombat("player"))
+            Decision.BlockQueuedDumpObservation()
+            return
+        end
+        if event == "PLAYER_REGEN_ENABLED" then
+            Decision.BlockQueuedDumpObservation()
+            return
+        end
+        if event == "PLAYER_TARGET_CHANGED" then
+            Decision.ClearQueuedDumpStateForTargetChange()
+            return
+        end
+        if event == "CURRENT_SPELL_CAST_CHANGED"
+            or event == "ACTIONBAR_UPDATE_STATE"
+            or event == "ACTIONBAR_UPDATE_USABLE" then
+            if ns.IsQueueDebugEnabled() then print("|cff00ff00[FuryQ]|r EVT=" .. event) end
+            Decision.MarkQueuedDumpStateChanged()
             return
         end
         if event == "PLAYER_LEVEL_UP"
@@ -6019,6 +6158,21 @@ function DecisionModule:Init()
             end
         end
     end)
+    frame:RegisterEvent("PLAYER_ENTERING_WORLD")
+    frame:RegisterEvent("PLAYER_REGEN_ENABLED")
+    frame:RegisterEvent("PLAYER_TARGET_CHANGED")
+    frame:RegisterEvent("PLAYER_LEVEL_UP")
+    frame:RegisterEvent("SPELLS_CHANGED")
+    frame:RegisterEvent("LEARNED_SPELL_IN_TAB")
+    frame:RegisterEvent("CHARACTER_POINTS_CHANGED")
+    frame:RegisterEvent("PLAYER_EQUIPMENT_CHANGED")
+    frame:RegisterEvent("GROUP_ROSTER_UPDATE")
+    pcall(frame.RegisterEvent, frame, "PARTY_MEMBERS_CHANGED")
+    pcall(frame.RegisterEvent, frame, "RAID_ROSTER_UPDATE")
+    frame:RegisterEvent("ACTIONBAR_UPDATE_STATE")
+    frame:RegisterEvent("ACTIONBAR_UPDATE_USABLE")
+    pcall(frame.RegisterEvent, frame, "CURRENT_SPELL_CAST_CHANGED")
+    frame:RegisterEvent("UNIT_AURA")
     self.eventFrame = frame
 end
 

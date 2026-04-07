@@ -786,6 +786,10 @@ local function UpdateQueuedTimeline(rec)
         queuedToken = nil
     end
     if queuedToken and renderState.lastQueuedToken ~= queuedToken then
+        -- New or changed queue: abort old event first, then push new
+        if renderState.lastQueuedToken then
+            AbortPendingQueueEvent(renderState.lastQueuedToken)
+        end
         local event = PushTimelineEvent("queued", queuedToken, true, {
             texture = GetTokenTexture(queuedToken),
             label = SHORT_LABEL[queuedToken] or "",
@@ -793,13 +797,6 @@ local function UpdateQueuedTimeline(rec)
         StartPreviewTransfer(queuedToken, event)
     elseif (not queuedToken) and renderState.lastQueuedToken then
         AbortPendingQueueEvent(renderState.lastQueuedToken)
-    elseif queuedToken and renderState.lastQueuedToken and queuedToken ~= renderState.lastQueuedToken then
-        AbortPendingQueueEvent(renderState.lastQueuedToken)
-        local event = PushTimelineEvent("queued", queuedToken, true, {
-            texture = GetTokenTexture(queuedToken),
-            label = SHORT_LABEL[queuedToken] or "",
-        })
-        StartPreviewTransfer(queuedToken, event)
     end
     renderState.lastQueuedToken = queuedToken
 end
